@@ -15,13 +15,24 @@ export * from "./types/session";
 export * from "./types/quality";
 export * from "./types/orchestration";
 
-// ---- IMPLEMENTATION MODULES (populated by build phases) ----
-// Exported as they land; kept alphabetical to reduce merge conflicts.
-// export * from "./agent/agent";
-// export * from "./events/bus";
-// export * from "./orchestration/orchestrator";
-// export * from "./providers/mock-provider";
-// export * from "./providers/registry";
-// export * from "./quality/gate";
-// export * from "./session/session";
-// export * from "./tools/registry";
+// ---- IMPLEMENTATION MODULES ----
+// Agent loop variants (winner will be promoted to the canonical path in Phase 2 review)
+export * from "./agent/variants/v-a/agent";
+// Orchestration variant (canonical executor currently under variant review)
+export * from "./orchestration/variants/v-b/orchestrator";
+// Providers
+export * from "./providers/mock-provider";
+export * from "./providers/registry";
+// Tool system
+export * from "./tools/registry";
+export * from "./tools/policy";
+export * from "./tools/builtins/read";
+export * from "./tools/builtins/write";
+export * from "./tools/builtins/edit";
+export * from "./tools/builtins/bash";
+// Session & state
+export * from "./session/session";
+// Event/telemetry bus
+export * from "./events/bus";
+// Quality gate
+export * from "./quality/gate";
