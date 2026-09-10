@@ -64,16 +64,22 @@ interface AssembledCall {
   arguments: string;
 }
 
+/**
+ * The API key lives in a module-level WeakMap instead of an instance
+ * property: TypeScript `private` is compile-time only, and a plain field
+ * would leak through JSON.stringify(provider) or Object.entries().
+ */
+const apiKeys = new WeakMap<OpenAICompatibleProvider, string>();
+
 export class OpenAICompatibleProvider implements LlmProvider {
   readonly id = "openai-compatible";
   private readonly baseUrl: string;
-  private readonly apiKey: string;
   private readonly model: string;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: OpenAICompatibleOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
-    this.apiKey = options.apiKey;
+    apiKeys.set(this, options.apiKey);
     this.model = options.model;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch.bind(globalThis);
   }
@@ -89,12 +95,13 @@ export class OpenAICompatibleProvider implements LlmProvider {
       stream: true,
       stream_options: { include_usage: true },
     };
+    const apiKey = apiKeys.get(this) ?? "";
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.baseUrl}/chat/completions`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),

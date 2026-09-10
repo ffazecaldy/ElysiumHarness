@@ -31,7 +31,8 @@ const regexCache = new Map<string, RegExp>();
 function cachedRegex(source: string): RegExp {
   const found = regexCache.get(source);
   if (found) return found;
-  const compiled = new RegExp(source);
+  // Case-insensitive: shell commands vary in casing (RM -RF must match rm -rf).
+  const compiled = new RegExp(source, "i");
   regexCache.set(source, compiled);
   return compiled;
 }
