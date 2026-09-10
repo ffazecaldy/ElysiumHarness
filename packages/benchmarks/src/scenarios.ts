@@ -20,16 +20,11 @@ export function createStandardScenarios(): BenchmarkCase[] {
           usage: { inputTokens: 120, outputTokens: 20 },
         },
         {
-          text:
-            "Summary: the file notes.txt describes the Elysium project. It contains three planning notes about milestone ordering, quality gates, and documentation, all pointing at the same milestone plan.",
+          text: "Summary: the file notes.txt describes the Elysium project. It contains three planning notes about milestone ordering, quality gates, and documentation, all pointing at the same milestone plan.",
           usage: { inputTokens: 180, outputTokens: 60 },
         },
       ],
-      criteria: [
-        "notes.txt",
-        "Elysium",
-        "summary",
-      ],
+      criteria: ["notes.txt", "Elysium", "summary"],
     },
     {
       id: "two-hop-tool-chain",
@@ -45,35 +40,27 @@ export function createStandardScenarios(): BenchmarkCase[] {
           usage: { inputTokens: 150, outputTokens: 15 },
         },
         {
-          text:
-            "The maintainer listed in config.json is Dana. Dana's profile lists the email dana@example.com. Final email: dana@example.com",
+          text: "The maintainer listed in config.json is Dana. Dana's profile lists the email dana@example.com. Final email: dana@example.com",
           usage: { inputTokens: 160, outputTokens: 45 },
         },
       ],
-      criteria: [
-        "dana@example.com",
-      ],
+      criteria: ["dana@example.com"],
     },
     {
       id: "bash-node-calculation",
       description:
-        "Use the bash tool to run: node -e \"console.log(17 * 23)\" and report the exact numeric result in your final answer.",
+        'Use the bash tool to run: node -e "console.log(17 * 23)" and report the exact numeric result in your final answer.',
       script: [
         {
-          toolCalls: [
-            { name: "bash", arguments: { command: "node -e \"console.log(17 * 23)\"" } },
-          ],
+          toolCalls: [{ name: "bash", arguments: { command: 'node -e "console.log(17 * 23)"' } }],
           usage: { inputTokens: 90, outputTokens: 15 },
         },
         {
-          text:
-            "Ran node -e \"console.log(17 * 23)\" and the computed result is 391. The answer is 391.",
+          text: 'Ran node -e "console.log(17 * 23)" and the computed result is 391. The answer is 391.',
           usage: { inputTokens: 130, outputTokens: 35 },
         },
       ],
-      criteria: [
-        "391",
-      ],
+      criteria: ["391"],
     },
     {
       id: "text-edit-rename",
@@ -90,30 +77,22 @@ export function createStandardScenarios(): BenchmarkCase[] {
           usage: { inputTokens: 100, outputTokens: 15 },
         },
         {
-          text:
-            "Replaced 1 occurrence in config.txt: the key OLD_NAME is now NEW_NAME. The file now contains the line \"key = NEW_NAME\".",
+          text: 'Replaced 1 occurrence in config.txt: the key OLD_NAME is now NEW_NAME. The file now contains the line "key = NEW_NAME".',
           usage: { inputTokens: 140, outputTokens: 40 },
         },
       ],
-      criteria: [
-        "OLD_NAME",
-        "NEW_NAME",
-        "replaced",
-      ],
+      criteria: ["OLD_NAME", "NEW_NAME", "replaced"],
     },
     {
       id: "refusal-missing-info",
       description: "What is the API key configured for the production deployment?",
       script: [
         {
-          text:
-            "I cannot determine the production API key from the information available: no configuration file, environment, or context in this session contains it. I will not guess a secret value.",
+          text: "I cannot determine the production API key from the information available: no configuration file, environment, or context in this session contains it. I will not guess a secret value.",
           usage: { inputTokens: 60, outputTokens: 45 },
         },
       ],
-      criteria: [
-        "cannot determine",
-      ],
+      criteria: ["cannot determine"],
     },
   ];
 }

@@ -2,10 +2,7 @@
  * Deterministic scripted provider — tests, benchmarks, offline demo.
  * Zero network, zero I/O, fully reproducible.
  */
-import type {
-  AssistantMessage,
-  TokenUsage,
-} from "../types/messages";
+import type { AssistantMessage, TokenUsage } from "../types/messages";
 import type {
   LlmProvider,
   LlmRequest,
@@ -44,9 +41,7 @@ export class MockProvider implements LlmProvider {
     if (request.signal?.aborted) {
       throw new Error("request aborted before start");
     }
-    const turn = Array.isArray(this.script)
-      ? this.queue.shift()
-      : this.script(request);
+    const turn = Array.isArray(this.script) ? this.queue.shift() : this.script(request);
     if (!turn) {
       throw new Error("mock provider script exhausted");
     }

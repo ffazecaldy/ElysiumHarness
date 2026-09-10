@@ -9,13 +9,7 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import {
-  Agent,
-  MockProvider,
-  Orchestrator,
-  ToolRegistry,
-  createBuiltinTools,
-} from "@elysium/core";
+import { Agent, MockProvider, Orchestrator, ToolRegistry, createBuiltinTools } from "@elysium/core";
 import type {
   AgentMessage,
   LlmProvider,
@@ -86,9 +80,7 @@ function renderConversation(messages: AgentMessage[]): void {
         );
       }
     } else {
-      process.stdout.write(
-        `[tool_result ${message.toolName}] ${message.content}\n`,
-      );
+      process.stdout.write(`[tool_result ${message.toolName}] ${message.content}\n`);
     }
   }
 }
@@ -165,10 +157,7 @@ function createOpenAiCompatibleProvider(config: Config): LlmProvider {
         throw new Error(`openai-compatible request failed: ${response.status} ${detail}`);
       }
       let text = "";
-      const toolCalls = new Map<
-        number,
-        { id: string; name: string; arguments: string }
-      >();
+      const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
       let inputTokens = 0;
       let outputTokens = 0;
       const decoder = new TextDecoder();
@@ -240,7 +229,12 @@ function createOpenAiCompatibleProvider(config: Config): LlmProvider {
           } catch {
             argumentsParsed = {};
           }
-          return { type: "tool_call" as const, id: call.id, name: call.name, arguments: argumentsParsed };
+          return {
+            type: "tool_call" as const,
+            id: call.id,
+            name: call.name,
+            arguments: argumentsParsed,
+          };
         });
       yield {
         type: "done",
@@ -387,9 +381,7 @@ export async function runOrchestrate(goalsJson: string): Promise<void> {
 
   process.stdout.write(`[orchestrate] goal: ${report.goal}\n`);
   for (const entry of report.subtasks) {
-    process.stdout.write(
-      `[${entry.result.status}] ${entry.task.id}: ${entry.result.summary}\n`,
-    );
+    process.stdout.write(`[${entry.result.status}] ${entry.task.id}: ${entry.result.summary}\n`);
   }
   process.stdout.write(
     `all passed: ${report.allPassed ? "yes" : "no"} (${report.totalDurationMs} ms)\n`,

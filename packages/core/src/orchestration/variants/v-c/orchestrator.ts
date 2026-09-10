@@ -120,7 +120,8 @@ export class Orchestrator {
         const repaired: PendingWork = {
           task: {
             ...work.task,
-            context: `${work.task.context ?? ""}\nREPAIR GAPS:\n${verdict?.gaps.join("\n") ?? ""}`.trim(),
+            context:
+              `${work.task.context ?? ""}\nREPAIR GAPS:\n${verdict?.gaps.join("\n") ?? ""}`.trim(),
           },
           repairCount: work.repairCount + 1,
         };
@@ -143,12 +144,19 @@ export class Orchestrator {
       }
       if (needsRepair && verdict) {
         // Budget exhausted: record the gaps, keep the best-known result.
-        result = { ...result, summary: `${result.summary} [unrepaired gaps: ${verdict.gaps.join("; ")}]` };
+        result = {
+          ...result,
+          summary: `${result.summary} [unrepaired gaps: ${verdict.gaps.join("; ")}]`,
+        };
       }
       if (work.repairCount > 0) {
         result = { ...result, summary: `[repair ${work.repairCount}] ${result.summary}` };
       }
-      reports.set(work.task.id, { task: work.task, result, ...(verdict ? { critic: verdict } : {}) });
+      reports.set(work.task.id, {
+        task: work.task,
+        result,
+        ...(verdict ? { critic: verdict } : {}),
+      });
       emit({
         type: "task_ended",
         timestamp: nowIso(),

@@ -21,7 +21,12 @@ export interface OrchestrationConfig {
   maxConcurrency: number;
 }
 
-const VALID_KINDS = ["retry_policy", "decomposition_granularity", "tool_ordering", "max_concurrency"] as const;
+const VALID_KINDS = [
+  "retry_policy",
+  "decomposition_granularity",
+  "tool_ordering",
+  "max_concurrency",
+] as const;
 
 export function isValidChange(change: HypothesisChange): boolean {
   return (VALID_KINDS as readonly string[]).includes(change.kind);
@@ -54,11 +59,13 @@ export class HypothesisEngine {
       .filter((e) => e.type === "latency" && (e.data as { scope?: string }).scope === "task")
       .map((e) => (e.data as { durationMs: number }).durationMs);
     const avgLatency =
-      latencies.length > 0
-        ? latencies.reduce((a, b) => a + b, 0) / latencies.length
-        : 0;
+      latencies.length > 0 ? latencies.reduce((a, b) => a + b, 0) / latencies.length : 0;
 
-    const make = (observation: Observation, change: HypothesisChange, expectedEffect: string): Hypothesis => {
+    const make = (
+      observation: Observation,
+      change: HypothesisChange,
+      expectedEffect: string,
+    ): Hypothesis => {
       const hyp: Hypothesis = {
         id: `hyp_${randomUUID()}`,
         observation,

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import type { PathPolicy, Tool } from "../../types/tools";
-import { resolveWithin } from "../policy";
 import { argBoolean, argString, err, ok, telemetry } from "../internal";
+import { resolveWithin } from "../policy";
 
 /** Adapt a needle/replacement to the file's dominant EOL style. */
 function matchEol(text: string, s: string): string {

@@ -4,12 +4,7 @@
  * The API key is used only in the Authorization header — never logged, never exposed.
  */
 import type { AgentMessage, AssistantMessage } from "../types/messages";
-import type {
-  LlmProvider,
-  LlmRequest,
-  StreamEvent,
-  ToolDefinition,
-} from "../types/provider";
+import type { LlmProvider, LlmRequest, StreamEvent, ToolDefinition } from "../types/provider";
 
 export interface OpenAICompatibleOptions {
   baseUrl: string;
@@ -43,9 +38,7 @@ function messageToOpenAi(m: AgentMessage): Record<string, unknown> {
   if (m.role === "assistant") {
     const content =
       m.text ||
-      m.toolCalls
-        .map((c) => `[tool_call ${c.name}(${JSON.stringify(c.arguments)})]`)
-        .join(" ");
+      m.toolCalls.map((c) => `[tool_call ${c.name}(${JSON.stringify(c.arguments)})]`).join(" ");
     return { role: "assistant", content };
   }
   return { role: "user", content: `[tool_result for ${m.toolName}] ${m.content}` };
@@ -132,10 +125,11 @@ export class OpenAICompatibleProvider implements LlmProvider {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        let nl: number;
-        while ((nl = buffer.indexOf("\n")) >= 0) {
+        let nl = buffer.indexOf("\n");
+        while (nl >= 0) {
           const line = buffer.slice(0, nl).trim();
           buffer = buffer.slice(nl + 1);
+          nl = buffer.indexOf("\n");
           if (!line.startsWith("data:")) continue;
           const payload = line.slice(5).trim();
           if (payload === "[DONE]") continue;
@@ -162,7 +156,11 @@ export class OpenAICompatibleProvider implements LlmProvider {
             if (fragment.id) existing.id = fragment.id;
             if (fragment.function?.name) {
               existing.name = fragment.function.name;
-              yield { type: "tool_call_start", id: existing.id || `tc_${fragment.index}`, name: existing.name };
+              yield {
+                type: "tool_call_start",
+                id: existing.id || `tc_${fragment.index}`,
+                name: existing.name,
+              };
             }
             if (fragment.function?.arguments) {
               existing.arguments += fragment.function.arguments;

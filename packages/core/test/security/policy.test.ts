@@ -6,17 +6,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
 import {
+  type HarnessEvent,
+  type PathPolicy,
   PathPolicyError,
+  type ToolContext,
+  type ToolResult,
   createBashTool,
   evaluateCommand,
   resolveWithin,
-  type HarnessEvent,
-  type PathPolicy,
-  type ToolContext,
-  type ToolResult,
 } from "@elysium/core";
+import { afterEach, describe, expect, it } from "vitest";
 
 const tmpRoots: string[] = [];
 
@@ -159,7 +159,10 @@ describe("evaluateCommand policy", () => {
 });
 
 describe("bash tool enforcement", () => {
-  function makeBash(root: string): { tool: ReturnType<typeof createBashTool>; events: HarnessEvent[] } {
+  function makeBash(root: string): {
+    tool: ReturnType<typeof createBashTool>;
+    events: HarnessEvent[];
+  } {
     const policy: PathPolicy = {
       allowedRoots: [root],
       deniedCommands: RM_DENIED_PATTERNS,
@@ -184,7 +187,7 @@ describe("bash tool enforcement", () => {
     const root = makeRoot("elysium-sec-bash-");
     const { tool } = makeBash(root);
     const result = await tool.execute(
-      { command: 'node -e "console.log(\'portable-ok\')"' },
+      { command: "node -e \"console.log('portable-ok')\"" },
       makeCtx(root, []),
     );
     expect(result.isError).toBe(false);
@@ -198,7 +201,7 @@ describe("bash tool enforcement", () => {
     expect(result.isError).toBe(false);
     expect(result.content).toContain("today-warn-check");
     const warnEvent = events.find(
-      (e) => e.type === "custom" && e.data["warn"] === true && e.data["tool"] === "bash",
+      (e) => e.type === "custom" && e.data.warn === true && e.data.tool === "bash",
     );
     expect(warnEvent).toBeDefined();
   });
@@ -253,22 +256,30 @@ describe("provider secret-handling regression", () => {
     return String(input);
   }
 
-  function resolveCtor(mod: Record<string, unknown>): (new (options: Record<string, unknown>) => unknown) | undefined {
+  function resolveCtor(
+    mod: Record<string, unknown>,
+  ): (new (options: Record<string, unknown>) => unknown) | undefined {
     const candidates = [
-      mod["OpenAICompatibleProvider"],
-      mod["OpenAIProvider"],
-      (mod["default"] instanceof Object ? (mod["default"] as Record<string, unknown>)["OpenAICompatibleProvider"] : undefined),
+      mod.OpenAICompatibleProvider,
+      mod.OpenAIProvider,
+      mod.default instanceof Object
+        ? (mod.default as Record<string, unknown>).OpenAICompatibleProvider
+        : undefined,
     ];
     for (const candidate of candidates) {
       if (typeof candidate === "function") {
-        return candidate as new (options: Record<string, unknown>) => unknown;
+        return candidate as new (
+          options: Record<string, unknown>,
+        ) => unknown;
       }
     }
     return undefined;
   }
 
   it("sends the api key only via Authorization header and never exposes it on the provider surface", async (ctx) => {
-    const existing = PROVIDER_CANDIDATES.filter((name) => fs.existsSync(path.join(providersDir, name)));
+    const existing = PROVIDER_CANDIDATES.filter((name) =>
+      fs.existsSync(path.join(providersDir, name)),
+    );
     if (existing.length === 0) {
       ctx.skip();
       return;
@@ -324,7 +335,10 @@ describe("provider secret-handling regression", () => {
       tools: [],
     };
     try {
-      const iterable = (streamFn as (req: unknown) => AsyncIterable<unknown>).call(instance, request);
+      const iterable = (streamFn as (req: unknown) => AsyncIterable<unknown>).call(
+        instance,
+        request,
+      );
       const iterator = iterable[Symbol.asyncIterator]();
       await iterator.next();
     } catch {
@@ -354,7 +368,9 @@ describe("provider secret-handling regression", () => {
     expect(serialized).not.toContain(SECRET);
     for (const [key, value] of Object.entries(instance as Record<string, unknown>)) {
       if (typeof value === "string") {
-        expect(`${key}=${value}`, `property ${key} must not hold the api key`).not.toContain(SECRET);
+        expect(`${key}=${value}`, `property ${key} must not hold the api key`).not.toContain(
+          SECRET,
+        );
       }
     }
   });

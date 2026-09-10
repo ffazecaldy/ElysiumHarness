@@ -1,21 +1,21 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
 import {
+  type HarnessEvent,
   PathPolicyError,
   Session,
   ToolRegistry,
+  type ToolResultMessage,
   createBashTool,
   createBuiltinTools,
   createEditTool,
   createReadTool,
   createWriteTool,
-  resolveWithin,
   evaluateCommand,
-  type HarnessEvent,
-  type ToolResultMessage,
+  resolveWithin,
 } from "@elysium/core";
+import { describe, expect, it } from "vitest";
 
 function tmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "elysium-test-"));
@@ -65,7 +65,10 @@ describe("path policy", () => {
     };
     expect(evaluateCommand(p, "rm -rf /")).toEqual({ allowed: false, warn: false });
     expect(evaluateCommand(p, "echo hello")).toEqual({ allowed: true, warn: false });
-    expect(evaluateCommand(p, "git push --force origin main")).toEqual({ allowed: true, warn: true });
+    expect(evaluateCommand(p, "git push --force origin main")).toEqual({
+      allowed: true,
+      warn: true,
+    });
   });
 });
 
@@ -77,7 +80,10 @@ describe("builtin tools", () => {
     const write = createWriteTool(policyFor(root));
     const read = createReadTool(policyFor(root));
 
-    const w = await write.execute({ path: "docs/note.txt", content: "a\nb\nc", createDirs: true }, ctx);
+    const w = await write.execute(
+      { path: "docs/note.txt", content: "a\nb\nc", createDirs: true },
+      ctx,
+    );
     expect(w.isError).toBe(false);
 
     const r1 = await read.execute({ path: "docs/note.txt" }, ctx);
@@ -135,7 +141,7 @@ describe("builtin tools", () => {
     };
     const bash = createBashTool(pol);
 
-    const okRun = await bash.execute({ command: "node -e \"console.log(6*7)\"" }, ctx);
+    const okRun = await bash.execute({ command: 'node -e "console.log(6*7)"' }, ctx);
     expect(okRun.isError).toBe(false);
     expect(okRun.content).toContain("42");
 
@@ -194,7 +200,7 @@ describe("Session", () => {
     // branch from the checkpoint
     const branch = s.appendUser("two-prime");
     expect(branch.parentId).toBe(cp.entryId);
-    expect(s.entries()).toHaveLength(3);
+    expect(s.entries()).toHaveLength(4); // 2 user entries + 1 leaf-marker (setLeaf) + 1 branch
   });
 
   it("buildContext projects the branch; summaries replace covered entries", async () => {
@@ -218,7 +224,11 @@ describe("Session", () => {
   it("throws on corrupted lines with the line number", () => {
     const dir = tmpDir();
     const file = path.join(dir, "s.jsonl");
-    fs.writeFileSync(file, '{"id":"e000001","parentId":null,"timestamp":"t","data":{"kind":"user","message":{"role":"user","content":"x"}}}\nnot-json\n', "utf-8");
+    fs.writeFileSync(
+      file,
+      '{"id":"e000001","parentId":null,"timestamp":"t","data":{"kind":"user","message":{"role":"user","content":"x"}}}\nnot-json\n',
+      "utf-8",
+    );
     expect(() => new Session({ filePath: file })).toThrow(/line 2/);
   });
 });

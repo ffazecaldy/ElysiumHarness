@@ -93,7 +93,10 @@ export function createHttpFetchTool(): Tool {
       properties: {
         url: { type: "string", description: "Absolute http(s) URL to fetch" },
         method: { type: "string", description: "HTTP method (default GET)" },
-        timeoutMs: { type: "number", description: "Request timeout in milliseconds (default 10000)" },
+        timeoutMs: {
+          type: "number",
+          description: "Request timeout in milliseconds (default 10000)",
+        },
       },
       required: ["url"],
     },

@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
 import { EventBus, makeEvent } from "@elysium/core";
+import type { HarnessEvent } from "@elysium/core";
+import { describe, expect, it } from "vitest";
 import { HypothesisEngine } from "../src/hypotheses/engine";
 import { MetaLayer } from "../src/loop";
 import { TelemetryStore } from "../src/store/telemetry-store";
-import type { HarnessEvent } from "@elysium/core";
 
 function taskEnded(status: string, taskId: string): HarnessEvent {
   return makeEvent("task_ended", { status }, { runId: "run-1", taskId });
@@ -31,7 +31,9 @@ describe("TelemetryStore", () => {
   });
 
   it("filters by time window", () => {
-    const s = new TelemetryStore({ filePath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ml-")), "t.jsonl") });
+    const s = new TelemetryStore({
+      filePath: path.join(fs.mkdtempSync(path.join(os.tmpdir(), "ml-")), "t.jsonl"),
+    });
     const e1 = taskEnded("pass", "a");
     e1.timestamp = "2026-01-01T00:00:00.000Z";
     const e2 = taskEnded("fail", "b");

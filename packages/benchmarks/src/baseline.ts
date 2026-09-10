@@ -133,12 +133,15 @@ export function compare(current: RunSummary, baseline: RunSummary): ComparisonRe
   const regressions: string[] = [];
   const thresholdRatio = 0.05;
   const regressed = (metric: string, delta: number, base: number): boolean => {
-    if (!isFiniteNumber(base) || base === 0) return delta < 0 ? false : false;
+    if (!isFiniteNumber(base) || base === 0) return false;
     const drift = delta / Math.abs(base);
     return Math.abs(drift) > thresholdRatio;
   };
   // Wrong direction per metric: first-pass rate and quality go down, tokens and latency go up.
-  if (regressed("firstPassRate", firstPassRateDelta, baseline.firstPassRate) && firstPassRateDelta < 0) {
+  if (
+    regressed("firstPassRate", firstPassRateDelta, baseline.firstPassRate) &&
+    firstPassRateDelta < 0
+  ) {
     regressions.push(
       `firstPassRate regressed: ${baseline.firstPassRate} -> ${current.firstPassRate} (delta ${firstPassRateDelta})`,
     );

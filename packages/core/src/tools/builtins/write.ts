@@ -1,8 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { PathPolicy, Tool } from "../../types/tools";
-import { resolveWithin } from "../policy";
 import { argBoolean, argString, err, ok, telemetry } from "../internal";
+import { resolveWithin } from "../policy";
 
 export function createWriteTool(policy: PathPolicy): Tool {
   return {
@@ -14,7 +14,10 @@ export function createWriteTool(policy: PathPolicy): Tool {
       properties: {
         path: { type: "string", description: "File path (absolute or relative to cwd)" },
         content: { type: "string", description: "Full file content" },
-        createDirs: { type: "boolean", description: "Create missing parent directories (default false)" },
+        createDirs: {
+          type: "boolean",
+          description: "Create missing parent directories (default false)",
+        },
       },
       required: ["path", "content"],
     },
@@ -34,7 +37,9 @@ export function createWriteTool(policy: PathPolicy): Tool {
             fs.mkdirSync(parent, { recursive: true });
           } else {
             telemetry(ctx.emit, "write", Date.now() - t0, true);
-            return err(`parent directory does not exist: ${parent} (pass createDirs=true to create)`);
+            return err(
+              `parent directory does not exist: ${parent} (pass createDirs=true to create)`,
+            );
           }
         }
         if (fs.existsSync(abs) && fs.statSync(abs).isDirectory()) {
@@ -43,7 +48,10 @@ export function createWriteTool(policy: PathPolicy): Tool {
         }
         fs.writeFileSync(abs, content, "utf-8");
         telemetry(ctx.emit, "write", Date.now() - t0, false);
-        return ok(`wrote ${content.length} chars to ${p}`, { path: abs, bytes: Buffer.byteLength(content) });
+        return ok(`wrote ${content.length} chars to ${p}`, {
+          path: abs,
+          bytes: Buffer.byteLength(content),
+        });
       } catch (e: unknown) {
         telemetry(ctx.emit, "write", Date.now() - t0, true);
         const message = e instanceof Error ? e.message : String(e);

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import type { PathPolicy, Tool } from "../../types/tools";
-import { resolveWithin } from "../policy";
 import { argNumber, argString, err, ok, telemetry } from "../internal";
+import { resolveWithin } from "../policy";
 
 interface ReadWindow {
   content: string;

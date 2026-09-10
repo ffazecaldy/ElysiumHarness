@@ -46,7 +46,9 @@ function assemble(dimensions: QualityDimensionScore[], threshold: number): Quali
   const weighted =
     Math.round(dimensions.reduce((acc, d) => acc + d.weight * d.score, 0) * 100) / 100;
   const passed = weighted >= threshold;
-  const reasons = passed ? [] : dimensions.filter((d) => d.score < 8).map((d) => `${d.name}: ${d.reason}`);
+  const reasons = passed
+    ? []
+    : dimensions.filter((d) => d.score < 8).map((d) => `${d.name}: ${d.reason}`);
   return { dimensions, weighted, passed, reasons };
 }
 

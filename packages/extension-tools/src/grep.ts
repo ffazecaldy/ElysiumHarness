@@ -156,7 +156,10 @@ export function createGrepTool(policy: PathPolicy): Tool {
       properties: {
         pattern: { type: "string", description: "Regular expression source (JavaScript syntax)" },
         path: { type: "string", description: "File or directory to search (default '.')" },
-        maxResults: { type: "number", description: "Maximum number of matching lines (default 50)" },
+        maxResults: {
+          type: "number",
+          description: "Maximum number of matching lines (default 50)",
+        },
       },
       required: ["pattern"],
     },

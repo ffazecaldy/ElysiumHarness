@@ -1,5 +1,5 @@
-import type { PathPolicy, Tool } from "../types/tools";
 import type { ToolDefinition } from "../types/provider";
+import type { PathPolicy, Tool } from "../types/tools";
 import { createBashTool } from "./builtins/bash";
 import { createEditTool } from "./builtins/edit";
 import { createReadTool } from "./builtins/read";

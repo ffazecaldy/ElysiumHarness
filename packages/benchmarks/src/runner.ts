@@ -15,12 +15,7 @@ import {
   createDefaultRubric,
   structuralJudge,
 } from "@elysium/core";
-import type {
-  GateArtifact,
-  PathPolicy,
-  Tool,
-  ToolResultMessage,
-} from "@elysium/core";
+import type { GateArtifact, PathPolicy, Tool, ToolResultMessage } from "@elysium/core";
 import type { BenchmarkCase, CaseResult, RunSummary, TokenTotals } from "./types";
 
 /** Minimum weighted quality score (0-10) for an attempt to count as a first pass. */
@@ -116,7 +111,10 @@ export class BenchmarkRunner {
     const completedAt = new Date().toISOString();
     const total = results.length;
     const firstPassCount = results.reduce((acc, r) => acc + (r.firstPass ? 1 : 0), 0);
-    const totalTokens = results.reduce((acc, r) => acc + r.tokens.inputTokens + r.tokens.outputTokens, 0);
+    const totalTokens = results.reduce(
+      (acc, r) => acc + r.tokens.inputTokens + r.tokens.outputTokens,
+      0,
+    );
     const totalLatency = results.reduce((acc, r) => acc + r.latencyMs, 0);
     const totalQuality = results.reduce((acc, r) => acc + r.qualityScore, 0);
     return {

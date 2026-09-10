@@ -83,8 +83,7 @@ export class Orchestrator {
           verdict = { passed: false, gaps: [`critic failed: ${message}`] };
         }
       }
-      const canRepair =
-        verdict !== undefined && !verdict.passed && repairCount < this.repairRounds;
+      const canRepair = verdict !== undefined && !verdict.passed && repairCount < this.repairRounds;
       if (canRepair) {
         emit({
           type: "task_ended",
@@ -128,14 +127,25 @@ export class Orchestrator {
     };
 
     const runOne = async (task: SubagentTask, repairCount: number): Promise<void> => {
-      emit({ type: "task_started", timestamp: nowIso(), runId, taskId: task.id, data: { repair: repairCount } });
+      emit({
+        type: "task_started",
+        timestamp: nowIso(),
+        runId,
+        taskId: task.id,
+        data: { repair: repairCount },
+      });
       const t0 = Date.now();
       let result: SubagentResult;
       try {
         result = await this.spawn(task);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
-        result = { taskId: task.id, status: "fail", summary: `spawn failed: ${message}`, artifacts: [] };
+        result = {
+          taskId: task.id,
+          status: "fail",
+          summary: `spawn failed: ${message}`,
+          artifacts: [],
+        };
       }
       await processResult(task, result, Date.now() - t0, repairCount);
     };

@@ -30,9 +30,17 @@ export class TelemetryStore {
   private load(): void {
     if (!fs.existsSync(this.filePath)) return;
     const raw = fs.readFileSync(this.filePath, "utf-8");
+    let lineNum = 0;
     for (const line of raw.split(/\r\n|\n/)) {
+      lineNum += 1;
       if (line.trim() === "") continue;
-      this.records.push(JSON.parse(line) as TelemetryRecord);
+      try {
+        this.records.push(JSON.parse(line) as TelemetryRecord);
+      } catch {
+        process.stderr.write(
+          `[telemetry-store] skipping malformed line ${lineNum} in ${this.filePath}\n`,
+        );
+      }
     }
   }
 

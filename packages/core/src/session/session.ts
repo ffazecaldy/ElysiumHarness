@@ -5,11 +5,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import type {
-  AgentMessage,
-  AssistantMessage,
-  ToolResultMessage,
-} from "../types/messages";
+import type { AgentMessage, AssistantMessage, ToolResultMessage } from "../types/messages";
 import type {
   Checkpoint,
   CompactionOptions,
@@ -61,6 +57,14 @@ export class Session {
         this.leaf = parsed.id;
       } catch {
         throw new Error(`corrupted session line ${i + 1} in ${this.filePath}`);
+      }
+    }
+    // Restore durable leaf pointer from the latest leaf: meta entry.
+    for (let i = this.log.length - 1; i >= 0; i--) {
+      const e = this.log[i];
+      if (e && e.data.kind === "meta" && e.data.label.startsWith("leaf:")) {
+        this.leaf = e.data.label.slice(5); // "leaf:<id>" -> id
+        break;
       }
     }
     const last = this.log[this.log.length - 1];
@@ -125,10 +129,20 @@ export class Session {
       throw new Error(`entry not found: ${entryIdStr}`);
     }
     this.leaf = entryIdStr;
+    // Persist leaf pointer as a meta entry for durability across reloads.
+    this.counter += 1;
+    const marker: SessionEntry = {
+      id: entryId(this.counter),
+      parentId: entryIdStr,
+      timestamp: nowIso(),
+      data: { kind: "meta", label: "leaf:" + entryIdStr },
+    };
+    this.log.push(marker);
+    this.persist(marker);
   }
 
   checkpoint(): Checkpoint {
-    return { entryId: this.leaf, entryCount: this.entries.length };
+    return { entryId: this.leaf, entryCount: this.log.length };
   }
 
   restore(cp: Checkpoint): void {

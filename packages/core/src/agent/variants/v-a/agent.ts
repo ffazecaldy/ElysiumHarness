@@ -202,9 +202,5 @@ export class Agent {
 }
 
 export function isToolCallPart(x: unknown): x is ToolCallPart {
-  return (
-    typeof x === "object" &&
-    x !== null &&
-    (x as Record<string, unknown>)["type"] === "tool_call"
-  );
+  return typeof x === "object" && x !== null && (x as Record<string, unknown>).type === "tool_call";
 }

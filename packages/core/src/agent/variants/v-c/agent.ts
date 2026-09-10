@@ -225,7 +225,10 @@ export function createAgentState(options: AgentOptions): AgentState {
   ) {
     throw new Error("provider must be an LlmProvider with a stream(request) method");
   }
-  if (options.maxTurns !== undefined && (!Number.isInteger(options.maxTurns) || options.maxTurns < 1)) {
+  if (
+    options.maxTurns !== undefined &&
+    (!Number.isInteger(options.maxTurns) || options.maxTurns < 1)
+  ) {
     throw new Error("maxTurns must be a positive integer");
   }
   const tools = options.tools === undefined ? [] : [...options.tools];

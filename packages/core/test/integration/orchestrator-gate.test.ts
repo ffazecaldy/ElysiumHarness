@@ -6,33 +6,33 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
 import {
   Agent,
-  isToolResultMessage,
-  MockProvider,
-  Orchestrator,
-  QualityGate,
-  ToolRegistry,
-  createDefaultRubric,
-  createReadTool,
-  structuralJudge,
   type AgentOptions,
   type CriticVerdict,
   type GateArtifact,
   type HarnessEvent,
   type LlmRequest,
+  MockProvider,
   type OrchestrationPlan,
+  Orchestrator,
   type PathPolicy,
+  QualityGate,
   type ScriptedTurn,
   type SpawnFn,
   type SubagentResult,
   type SubagentTask,
   type Tool,
   type ToolCallPart,
+  ToolRegistry,
   type ToolResult,
   type ToolResultMessage,
+  createDefaultRubric,
+  createReadTool,
+  isToolResultMessage,
+  structuralJudge,
 } from "@elysium/core";
+import { afterEach, describe, expect, it } from "vitest";
 
 const SEED_MARKER = "ELYSIUM-SEED-9f27c";
 const SEED_CONTENT = `${SEED_MARKER}: pineapples orbit mars on tuesdays.`;
@@ -167,9 +167,7 @@ describe("agent end-to-end through the executeTool seam", () => {
     const events: HarnessEvent[] = [];
     const agent = new Agent({
       systemPrompt: AGENT_SYSTEM_PROMPT,
-      provider: new MockProvider((req) =>
-        scriptFor({ id: "solo", goal: "Read seed.txt." }, req),
-      ),
+      provider: new MockProvider((req) => scriptFor({ id: "solo", goal: "Read seed.txt." }, req)),
       tools: sandbox.registry.list(),
       maxTurns: 4,
       executeTool: makeExecuteTool(sandbox, events),
@@ -205,7 +203,7 @@ describe("agent end-to-end through the executeTool seam", () => {
     }
 
     // The read tool emitted its telemetry through the same event pipe.
-    expect(events.some((e) => e.type === "tool_called" && e.data["tool"] === "read")).toBe(true);
+    expect(events.some((e) => e.type === "tool_called" && e.data.tool === "read")).toBe(true);
   });
 });
 
@@ -282,18 +280,16 @@ describe("orchestrator: 3 subtasks, concurrency 2, critic repair, latency events
     for (const id of ["task-alpha", "task-beta", GAMMA_ID]) {
       expect(latencyTaskIds.has(id)).toBe(true);
     }
-    expect(latency.every((e) => e.data["scope"] === "task")).toBe(true);
+    expect(latency.every((e) => e.data.scope === "task")).toBe(true);
 
     // One task_started per subtask; the gamma task_ended reports 2 attempts.
     const started = events.filter((e) => e.type === "task_started");
     expect(new Set(started.map((e) => e.taskId)).size).toBe(3);
-    const gammaEnded = events.find(
-      (e) => e.type === "task_ended" && e.taskId === GAMMA_ID,
-    );
+    const gammaEnded = events.find((e) => e.type === "task_ended" && e.taskId === GAMMA_ID);
     expect(gammaEnded).toBeDefined();
     if (gammaEnded) {
-      expect(gammaEnded.data["attempts"]).toBe(2);
-      expect(gammaEnded.data["status"]).toBe("pass");
+      expect(gammaEnded.data.attempts).toBe(2);
+      expect(gammaEnded.data.status).toBe("pass");
     }
 
     // Observed concurrency never exceeded maxConcurrency 2 and did reach 2.

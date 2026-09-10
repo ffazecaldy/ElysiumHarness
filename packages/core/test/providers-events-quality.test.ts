@@ -1,14 +1,14 @@
-import { describe, expect, it } from "vitest";
 import {
   EventBus,
+  type LlmRequest,
   MockProvider,
   ProviderRegistry,
   QualityGate,
   createDefaultRubric,
   makeEvent,
   structuralJudge,
-  type LlmRequest,
 } from "@elysium/core";
+import { describe, expect, it } from "vitest";
 
 const baseRequest: LlmRequest = {
   systemPrompt: "sys",
@@ -80,7 +80,9 @@ describe("ProviderRegistry", () => {
   it("rejects duplicate ids and resolves by id", () => {
     const registry = new ProviderRegistry();
     registry.register(new MockProvider([{ text: "a" }]));
-    expect(() => registry.register(new MockProvider([{ text: "b" }]))).toThrow(/already registered/);
+    expect(() => registry.register(new MockProvider([{ text: "b" }]))).toThrow(
+      /already registered/,
+    );
     expect(registry.get("mock")).toBeDefined();
     expect(registry.get("nope")).toBeUndefined();
     expect(registry.list()).toHaveLength(1);
@@ -136,7 +138,7 @@ describe("QualityGate", () => {
     const score = await gate.evaluate(
       {
         kind: "code",
-        content: "x".repeat(400) + " implements the registry and the policy engine and depth validation",
+        content: `${"x".repeat(400)} implements the registry and the policy engine and depth validation`,
         criteria: ["registry", "policy engine", "depth validation"],
       },
       rubric,

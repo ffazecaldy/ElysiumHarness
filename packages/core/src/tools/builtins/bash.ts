@@ -1,7 +1,7 @@
 import { exec } from "node:child_process";
 import type { PathPolicy, Tool, ToolContext } from "../../types/tools";
-import { evaluateCommand, resolveWithin } from "../policy";
 import { argString, err, ok, telemetry } from "../internal";
+import { evaluateCommand, resolveWithin } from "../policy";
 
 const BASH_TIMEOUT_MS = 30_000;
 
@@ -16,7 +16,10 @@ function runCommand(
       { cwd, timeout: BASH_TIMEOUT_MS, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
       (error, stdout, stderr) => {
         let code: number | null = null;
-        if (error && typeof (error as NodeJS.ErrnoException & { code?: unknown }).code === "number") {
+        if (
+          error &&
+          typeof (error as NodeJS.ErrnoException & { code?: unknown }).code === "number"
+        ) {
           code = (error as unknown as { code: number }).code;
         }
         resolve({ stdout, stderr, code });
@@ -39,7 +42,10 @@ export function createBashTool(policy: PathPolicy): Tool {
       type: "object",
       properties: {
         command: { type: "string", description: "Shell command to execute" },
-        cwd: { type: "string", description: "Optional working directory (must stay inside allowed roots)" },
+        cwd: {
+          type: "string",
+          description: "Optional working directory (must stay inside allowed roots)",
+        },
       },
       required: ["command"],
     },
