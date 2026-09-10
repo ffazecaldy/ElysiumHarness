@@ -21,8 +21,8 @@ import type {
   ToolCallPart,
   ToolResultMessage,
 } from "@elysium/core";
-import { loadConfig } from "./config";
-import type { Config } from "./config";
+import { loadConfig, describeConfig } from "./config";
+import type { ProviderConfig } from "./config";
 
 const SYSTEM_PROMPT =
   "You are the Elysium demo agent. Use the available tools when asked to access files.";
@@ -94,7 +94,7 @@ function renderUsage(label: string, inputTokens: number, outputTokens: number): 
  * Used only when the environment configures a real provider endpoint
  * (ELYSIUM_PROVIDER=openai-compatible with base URL and API key).
  */
-function createOpenAiCompatibleProvider(config: Config): LlmProvider {
+function createOpenAiCompatibleProvider(config: ProviderConfig): LlmProvider {
   const baseUrl = config.baseUrl ?? "";
   const apiKey = config.apiKey ?? "";
   const model = config.model ?? "gpt-4o-mini";
@@ -251,8 +251,8 @@ function createOpenAiCompatibleProvider(config: Config): LlmProvider {
 }
 
 /** Provider for a task run: configured endpoint if present, else a mock. */
-function makeTaskProvider(config: Config, task: string): LlmProvider {
-  if (config.provider === "openai-compatible" && config.baseUrl && config.apiKey) {
+function makeTaskProvider(config: ProviderConfig, task: string): LlmProvider {
+  if (config.baseUrl && config.apiKey && config.provider !== "ollama") {
     return createOpenAiCompatibleProvider(config);
   }
   return new MockProvider([{ text: `echo: ${task}` }]);
@@ -302,9 +302,9 @@ export async function runTask(task: string): Promise<void> {
   if (trimmed.length === 0) {
     throw new Error("task must not be empty");
   }
-  const config = loadConfig(process.env);
+  const config = loadConfig();
   const registry = new ToolRegistry();
-  for (const tool of createBuiltinTools({ allowedRoots: [config.cwd] })) {
+  for (const tool of createBuiltinTools({ allowedRoots: [process.cwd()] })) {
     registry.register(tool);
   }
   const provider = makeTaskProvider(config, trimmed);
@@ -312,7 +312,7 @@ export async function runTask(task: string): Promise<void> {
     systemPrompt: SYSTEM_PROMPT,
     provider,
     tools: registry.list(),
-    executeTool: makeToolExecutor(registry, config.cwd),
+    executeTool: makeToolExecutor(registry, process.cwd()),
   });
   const result = await agent.run(trimmed);
   renderConversation(result.messages);

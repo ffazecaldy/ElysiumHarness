@@ -14,6 +14,7 @@ export * from "./types/tools";
 export * from "./types/session";
 export * from "./types/quality";
 export * from "./types/orchestration";
+export * from "./types/errors";
 
 // ---- IMPLEMENTATION MODULES ----
 // Agent loop variants (winner will be promoted to the canonical path in Phase 2 review)
@@ -23,6 +24,7 @@ export * from "./orchestration/orchestrator";
 // Providers
 export * from "./providers/mock-provider";
 export * from "./providers/registry";
+export * from "./providers/openai-compatible";
 // Tool system
 export * from "./tools/registry";
 export * from "./tools/policy";

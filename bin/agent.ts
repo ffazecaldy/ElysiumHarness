@@ -6,17 +6,14 @@
  *   pnpm agent "do something"      Single task
  *   pnpm agent --help              Show help
  *
- * Slash commands in REPL:
- *   /model [name]       Show or switch model
- *   /connections        Show configured providers
- *   /key <provider> <key>  Set API key for a provider
- *   /tools              List available tools
- *   /workspace          Show workspace path
- *   /clear              Clear screen
- *   /help               Show help
- *   /quit               Exit
+ * Slash commands in REPL: /model /key /connections /tools /workspace /clear /help /quit
  *
- * Configure providers in .env (see .env.example).
+ * Providers are configured in .env (see .env.example) or via /key.
+ *
+ * Error policy: recoverable errors (missing key, unknown provider, failed
+ * switch) are caught by the command error boundary and displayed — the REPL
+ * always keeps running. Only startup failures may terminate the process,
+ * and only from this entrypoint.
  */
 import readline from "node:readline";
 import fs from "node:fs";
@@ -27,10 +24,16 @@ import {
   OpenAICompatibleProvider,
   ToolRegistry,
   createBuiltinTools,
-  type Tool,
+  MissingApiKeyError,
+  ProviderInitializationError,
+  UnknownProviderError,
+  RecoverableCliError,
   type ToolResultMessage,
   type ToolCallPart,
+  makeEvent,
+  type EventBus,
 } from "@elysium/core";
+import { EventBus as RealEventBus } from "@elysium/core";
 import {
   loadConfig,
   saveEnvValue,
@@ -51,18 +54,28 @@ const WORKSPACE = fs.mkdtempSync(path.join(
 const SYSTEM_PROMPT =
   "You are Elysium, an AI coding agent. You have access to tools for reading, writing, editing files, and executing commands. Use them when needed. Be concise and direct. Always explain what you did.";
 
-// ── Provider factory ──────────────────────────────────────────────
+// ── Event bus (shared: meta-layer & CLI both consume) ─────────────
 
-function createProvider(config: ProviderConfig) {
+const eventBus: EventBus = new RealEventBus({ bufferSize: 2000 });
+
+/** Emit a CLI error as a structured event (no secrets in payload, ever). */
+function emitCliError(kind: string, message: string): void {
+  eventBus.emit({
+    type: "error",
+    timestamp: new Date().toISOString(),
+    data: { scope: "cli", kind, message },
+  });
+}
+
+// ── Provider factory: THROWS typed errors, NEVER process.exit ─────
+
+const CREDENTIAL_LESS = new Set<string>(["mock", "ollama"]);
+
+function makeProvider(config: ProviderConfig) {
   if (config.provider === "mock") {
     return new MockProvider([
       { text: "I am running in mock mode (offline). Configure a real provider with /key or .env file." },
     ]);
-  }
-  if (!config.apiKey && config.provider !== "ollama") {
-    console.error(`\n  ⚠  No API key for ${PROVIDER_NAMES[config.provider] ?? config.provider}.`);
-    console.error(`  Use: /key ${config.provider} <your-api-key>\n`);
-    process.exit(1);
   }
   return new OpenAICompatibleProvider({
     baseUrl: config.baseUrl,
@@ -71,33 +84,33 @@ function createProvider(config: ProviderConfig) {
   });
 }
 
-// ── Tool wiring ───────────────────────────────────────────────────
-
-function createToolRegistry(): ToolRegistry {
-  const policy = { allowedRoots: [WORKSPACE, process.cwd()] };
-  const registry = new ToolRegistry();
-  for (const tool of createBuiltinTools(policy)) registry.register(tool);
-  return registry;
+/**
+ * Validate + attempt to initialize the candidate provider BEFORE committing.
+ * Throws typed RecoverableCliError subclasses only — never process.exit.
+ */
+function assertSwitchable(candidate: ProviderConfig): void {
+  if (!(candidate.provider in PROVIDER_URLS)) {
+    throw new UnknownProviderError(candidate.provider);
+  }
+  if (!CREDENTIAL_LESS.has(candidate.provider) && !candidate.apiKey) {
+    throw new MissingApiKeyError(candidate.provider);
+  }
 }
 
-function wireAgent(config: ProviderConfig, registry: ToolRegistry): Agent {
-  const provider = createProvider(config);
+function wireAgentFor(config: ProviderConfig, registry: ToolRegistry): Agent {
+  const provider = makeProvider(config);
   return new Agent({
     systemPrompt: SYSTEM_PROMPT,
     provider,
     tools: registry.list(),
     maxTurns: 8,
-    executeTool: async (call: ToolCallPart, ctx: { signal: AbortSignal }): Promise<ToolResultMessage> => {
+    executeTool: async (call, ctx): Promise<ToolResultMessage> => {
       const tool = registry.get(call.name);
       if (!tool) {
         return { role: "tool_result", toolCallId: call.id, toolName: call.name, content: `unknown tool: ${call.name}`, isError: true };
       }
       try {
-        const result = await tool.execute(call.arguments, {
-          cwd: WORKSPACE,
-          signal: ctx.signal,
-          emit: () => undefined,
-        });
+        const result = await tool.execute(call.arguments, { cwd: WORKSPACE, signal: ctx.signal, emit: (e) => eventBus.emit(e) });
         return {
           role: "tool_result", toolCallId: call.id, toolName: call.name,
           content: result.content, isError: result.isError,
@@ -111,175 +124,292 @@ function wireAgent(config: ProviderConfig, registry: ToolRegistry): Agent {
   });
 }
 
-// ── Args ──────────────────────────────────────────────────────────
+// ── Edit-distance for the /model suggestion ──────────────────────
 
-function parseArgs(argv: string[]): { task: string | null; provider: string | null; help: boolean } {
-  let task: string | null = null;
-  let provider: string | null = null;
-  let help = false;
-  const args = argv.slice(2);
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--help" || args[i] === "-h") help = true;
-    else if (args[i] === "--task" && args[i + 1]) task = args[++i] ?? null;
-    else if (args[i] === "--provider" && args[i + 1]) provider = args[++i] ?? null;
-    else if (!args[i]!.startsWith("-")) task = args[i];
+function editDistance(a: string, b: string): number {
+  const dp = Array.from({ length: a.length + 1 }, () => new Array<number>(b.length + 1).fill(0));
+  for (let i = 0; i <= a.length; i++) dp[i]![0] = i;
+  for (let j = 0; j <= b.length; j++) dp[0]![j] = j;
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      dp[i]![j] = Math.min(
+        dp[i - 1]![j]! + 1,
+        dp[i]![j - 1]! + 1,
+        dp[i - 1]![j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
   }
-  return { task, provider, help };
+  return dp[a.length]![b.length]!;
 }
 
-// ── REPL ──────────────────────────────────────────────────────────
-
-async function runRepl(config: ProviderConfig): Promise<void> {
-  const registry = createToolRegistry();
-  let agent = wireAgent(config, registry);
-
-  console.log(`
-  ╔══════════════════════════════════════════╗
-  ║        ⚡  Elysium Harness  ⚡           ║
-  ║        AI Agent with Tool Use            ║
-  ╚══════════════════════════════════════════╝
-`);
-  console.log(`  Provider: ${describeConfig(config)}`);
-  console.log(`  Workspace: ${WORKSPACE}`);
-  console.log(`  Type /help for commands.\n`);
-
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "⚡ > " });
-  rl.prompt();
-
-  rl.on("line", async (line: string) => {
-    const input = line.trim();
-    if (!input) { rl.prompt(); return; }
-
-    // ── Slash commands ──
-    if (input === "/quit" || input === "/exit") {
-      console.log("\n  👋 Goodbye.\n"); process.exit(0);
+function suggestProvider(name: string): string | null {
+  let best: string | null = null;
+  let bestDist = Number.POSITIVE_INFINITY;
+  for (const known of Object.keys(PROVIDER_URLS)) {
+    const d = editDistance(name, known);
+    if (d < bestDist) {
+      bestDist = d;
+      best = known;
     }
-    if (input === "/clear") { console.clear(); rl.prompt(); return; }
-    if (input === "/help") {
-      console.log(`
+  }
+  return best && bestDist <= Math.max(2, Math.floor(name.length / 3)) ? best : null;
+}
+
+// ── Command dispatcher (transactional provider switching) ────────
+
+interface ReplState {
+  config: ProviderConfig;
+  /** Live provider state: the committed config the agent is wired to. */
+  committed: ProviderConfig;
+}
+
+function renderRecoverableError(title: string, action: string): void {
+  console.log(`\n  ⚠️  ${title}`);
+  if (action) console.log(`  → ${action}`);
+  console.log(`\n`);
+}
+
+async function dispatchCommand(
+  input: string,
+  state: ReplState,
+  registry: ToolRegistry,
+  rebuildAgent: (config: ProviderConfig) => void,
+): Promise<void> {
+  // /quit and /clear are handled by the caller (process-level).
+  if (input === "/help") {
+    console.log(`
   Commands:
     /model                  Show current provider and model
-    /model <provider>       Switch provider (openai, deepseek, groq, glm, opencode, ollama, mock)
+    /model <provider>       Switch provider (openai | deepseek | groq | together | openrouter | glm | opencode | ollama | mock)
     /model <provider> <m>   Switch provider and model
-    /connections            List all configured providers and their status
-    /key <provider> <key>   Set API key (saved to .env)
-    /tools                  List available tools
+    /connections            Provider status table
+    /key <provider> <key>   Set API key (saved to .env, never echoed fully)
+    /tools                  List tools
     /workspace              Show workspace path
     /clear                  Clear screen
     /help                   This help
     /quit                   Exit
-`); rl.prompt(); return;
+`);
+    return;
+  }
+  if (input === "/model") {
+    console.log(`\n  Current: ${describeConfig(state.config)}`);
+    console.log(`\n  Available providers:`);
+    for (const [k, v] of Object.entries(PROVIDER_NAMES)) {
+      console.log(`    ${(k === state.committed.provider ? "* " : "  ")}${k.padEnd(12)} ${v}`);
     }
-    if (input === "/model") {
-      console.log(`\n  Current: ${describeConfig(config)}\n`);
-      console.log(`  Available providers:`);
-      for (const [k, v] of Object.entries(PROVIDER_NAMES)) {
-        const current = k === config.provider ? " ← active" : "";
-        console.log(`    ${k.padEnd(12)} ${v}${current}`);
-      }
-      console.log();
-      rl.prompt(); return;
+    console.log();
+    return;
+  }
+  if (input.startsWith("/model ")) {
+    const parts = input.slice(7).trim().split(/\s+/);
+    const target = parts[0] as string;
+    const targetModel = parts[1];
+    if (!(target in PROVIDER_URLS)) {
+      const suggestion = suggestProvider(target);
+      let msg = `Unknown provider: ${target}`;
+      if (suggestion) msg += ` — did you mean '${suggestion}'?`;
+      throw new UnknownProviderError(target);
     }
-    if (input.startsWith("/model ")) {
-      const parts = input.slice(7).trim().split(/\s+/);
-      const newProvider = parts[0] as ProviderName;
-      const newModel = parts[1] || PROVIDER_MODELS[newProvider] || "";
-      if (!PROVIDER_URLS[newProvider]) {
-        console.log(`\n  ✗ Unknown provider: ${newProvider}\n`);
-        rl.prompt(); return;
-      }
-      const oldProvider = config.provider;
-      config = { ...config, provider: newProvider, baseUrl: PROVIDER_URLS[newProvider], model: newModel || PROVIDER_MODELS[newProvider] };
-      saveEnvValue(PROJECT_ROOT, "ELYSIUM_PROVIDER", newProvider);
-      if (newModel) saveEnvValue(PROJECT_ROOT, "ELYSIUM_MODEL", newModel);
-      saveEnvValue(PROJECT_ROOT, "ELYSIUM_BASE_URL", "");
-      // Rebuild agent with new provider
-      try {
-        agent = wireAgent(config, registry);
-        console.log(`\n  ✓ Switched to ${PROVIDER_NAMES[newProvider] ?? newProvider} | ${config.model}\n`);
-      } catch (err: unknown) {
-        console.log(`\n  ✗ ${err instanceof Error ? err.message : String(err)}\n`);
-        config = { ...config, provider: oldProvider };
-      }
-      rl.prompt(); return;
-    }
-    if (input.startsWith("/key ")) {
-      const parts = input.slice(5).trim().split(/\s+/);
-      if (parts.length < 2) { console.log(`\n  Usage: /key <provider> <api-key>\n`); rl.prompt(); return; }
-      const [prov, ...keyParts] = parts;
-      const key = keyParts.join(" ");
-      if (!PROVIDER_URLS[prov!]) {
-        console.log(`\n  ✗ Unknown provider: ${prov}. Use: /key <openai|deepseek|groq|glm|opencode|openrouter> <key>\n`);
-        rl.prompt(); return;
-      }
-      saveEnvValue(PROJECT_ROOT, "ELYSIUM_API_KEY", key);
-      saveEnvValue(PROJECT_ROOT, "ELYSIUM_PROVIDER", prov!);
-      if (!config.apiKey) config = { ...config, apiKey: key, provider: prov as ProviderName, baseUrl: PROVIDER_URLS[prov!] };
-      const masked = key.slice(0, 6) + "***" + key.slice(-3);
-      console.log(`\n  ✓ Key saved for ${PROVIDER_NAMES[prov!] ?? prov}: ${masked}\n`);
-      rl.prompt(); return;
-    }
-    if (input === "/connections") {
-      console.log(`\n  ┌─────────────┬──────────────────────┬────────────────────┬─────────────┐`);
-      console.log(`  │ Provider    │ Service              │ Model              │ Status      │`);
-      console.log(`  ├─────────────┼──────────────────────┼────────────────────┼─────────────┤`);
-      for (const [name, url] of Object.entries(PROVIDER_URLS)) {
-        const provConfig = name === config.provider ? config : { ...config, provider: name, baseUrl: url };
-        const key = name === config.provider ? config.apiKey : "";
-        const model = name === config.provider ? config.model : PROVIDER_MODELS[name] || "";
-        const status = name === config.provider ? "🟢 active" :
-          (name === "ollama" || name === "opencode") ? "⚪ local" :
-            key ? "🟢 configured" : "🔴 no key";
-        console.log(`  │ ${name.padEnd(11)} │ ${(PROVIDER_NAMES[name] || name).padEnd(20)} │ ${model.padEnd(18)} │ ${status.padEnd(11)} │`);
-      }
-      console.log(`  └─────────────┴──────────────────────┴────────────────────┴─────────────┘\n`);
-      rl.prompt(); return;
-    }
-    if (input === "/tools") {
-      console.log(`\n  Available tools:`);
-      for (const t of registry.list()) {
-        console.log(`    ${t.name.padEnd(14)} ${t.description.slice(0, 65)}`);
-      }
-      console.log(`\n  Workspace: ${WORKSPACE}\n`);
-      rl.prompt(); return;
-    }
-    if (input === "/workspace") {
-      console.log(`\n  ${WORKSPACE}\n`);
-      rl.prompt(); return;
-    }
-
-    // ── Agent turn ──
+    // Build candidate config, validate BEFORE touching the live one.
+    // Read the provider's key from the live .env (user may have set it via /key).
+    const freshEnv = loadConfig(PROJECT_ROOT);
+    const candidateKey = target === freshEnv.provider
+      ? freshEnv.apiKey
+      : target === state.committed.provider ? state.committed.apiKey : "";
+    const candidate: ProviderConfig = {
+      ...state.committed,
+      provider: target as ProviderName,
+      baseUrl: PROVIDER_URLS[target] ?? "",
+      model: targetModel ?? PROVIDER_MODELS[target] ?? "",
+      apiKey: candidateKey,
+    };
+    assertSwitchable(candidate);
+    // Initialize the candidate provider before committing.
+    let candidateAgent: Agent;
     try {
-      const t0 = Date.now();
-      const result = await agent.run(input);
-      const dt = Date.now() - t0;
-      let printed = false;
-      for (const m of result.messages) {
-        if (m.role === "assistant" && m.text) {
-          console.log(`\n${m.text}`);
-          printed = true;
-        } else if (m.role === "tool_result") {
-          const icon = m.isError ? "✗" : "✓";
-          const preview = m.content.length > 120 ? m.content.slice(0, 120) + "…" : m.content;
-          console.log(`  ${icon} ${m.toolName}: ${preview}`);
-        }
-      }
-      if (!printed) console.log("\n  (no response)");
-      console.log(`  ── ${result.turns}t ${result.usage.inputTokens}+${result.usage.outputTokens}tok ${dt}ms ──`);
+      candidateAgent = wireAgentFor(candidate, registry);
     } catch (err: unknown) {
-      console.error(`\n  ✗ Error: ${err instanceof Error ? err.message : String(err)}\n`);
+      if (err instanceof RecoverableCliError) throw err;
+      throw new ProviderInitializationError(
+        `Provider ${target} failed to initialize: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
-    rl.prompt();
+    // Commit only on success: rebuild the live agent onto the candidate.
+    state.committed = candidate;
+    state.config = candidate;
+    rebuildAgent(candidate);
+    void candidateAgent;
+    saveEnvValue(PROJECT_ROOT, "ELYSIUM_PROVIDER", target);
+    if (targetModel) saveEnvValue(PROJECT_ROOT, "ELYSIUM_MODEL", targetModel);
+    console.log(`\n  ✓ Active provider: ${describeConfig(candidate)}\n`);
+    return;
+  }
+  if (input.startsWith("/key ")) {
+    const parts = input.slice(5).trim().split(/\s+/);
+    if (parts.length < 2) {
+      throw new RecoverableCliError("Missing arguments", "Usage: /key <provider> <api-key>");
+    }
+    const prov = parts[0]!;
+    const key = parts.slice(1).join(" ");
+    if (!(prov in PROVIDER_URLS)) {
+      throw new UnknownProviderError(prov);
+    }
+    if (key.length < 4) {
+      throw new RecoverableCliError("API key too short to be valid", `Usage: /key ${prov} <your-api-key>`);
+    }
+    saveEnvValue(PROJECT_ROOT, "ELYSIUM_API_KEY", key);
+    saveEnvValue(PROJECT_ROOT, "ELYSIUM_PROVIDER", prov);
+    const masked = key.slice(0, 6) + "***" + key.slice(-3);
+    console.log(`\n  ✅ Key saved for ${PROVIDER_NAMES[prov] ?? prov}: ${masked}`);
+    console.log(`  → Now switch: /model ${prov}\n`);
+    return;
+  }
+  if (input === "/connections") {
+    console.log(`\n  Providers (configured in .env or via /key):`);
+    for (const [name, url] of Object.entries(PROVIDER_URLS)) {
+      const configured = name in CREDENTIAL_LESS ? "ready (no key needed)" : "key required (/key <provider> <key>)";
+      console.log(`    ${name.padEnd(12)} ${String(PROVIDER_NAMES[name]).padEnd(16)} ${url.padEnd(40)} ${configured}`);
+    }
+    console.log();
+    return;
+  }
+  if (input === "/tools") {
+    console.log(`\n  Available tools:`);
+    for (const t of registry.list()) {
+      console.log(`    ${t.name.padEnd(14)} ${t.description.slice(0, 65)}`);
+    }
+    console.log(`\n  Workspace: ${WORKSPACE}\n`);
+    return;
+  }
+  if (input === "/workspace") {
+    console.log(`\n  ${WORKSPACE}\n`);
+    return;
+  }
+  if (input.startsWith("/")) {
+    const cmd = input.split(/\s+/)[0] ?? "";
+    console.log(`\n  ⚠️  Unknown command: ${cmd}`);
+    console.log(`  → /help lists available commands\n`);
+    return;
+  }
+}
+
+// ── REPL loop with command error boundary ────────────────────────
+
+async function runRepl(startConfig: ProviderConfig): Promise<void> {
+  const registry = createToolRegistry();
+  const state: ReplState = { config: startConfig, committed: startConfig };
+  let agent = wireAgentFor(state.committed, registry);
+
+  console.log("\n  ╔══════════════════════════════════════════╗");
+  console.log("  ║        ⚡  Elysium Harness  ⚡           ║");
+  console.log("  ║        AI Agent with Tool Use            ║");
+  console.log("  ╚══════════════════════════════════════════╝\n");
+  console.log(`  Provider: ${describeConfig(state.committed)}`);
+  console.log(`  Workspace: ${WORKSPACE}`);
+  console.log("  Type /help for commands.\n");
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "⚡ > " });
+  rl.prompt();
+
+  // Serialize line handling: piped readline fires faster than async
+  // handlers settle, so /quit could otherwise exit before earlier
+  // commands finish (this caused the original "silent no-op" symptom).
+  let lineQueue: Promise<void> = Promise.resolve();
+  rl.on("line", (raw: string) => {
+    lineQueue = lineQueue
+      .then(() => handleReplLine(raw, { state, registry, setAgent: (a) => { agent = a; }, getAgent: () => agent }))
+      .catch((err: unknown) => {
+        console.error(`\n  ✗ Command loop error: ${err instanceof Error ? err.message : String(err)}\n`);
+      })
+      .finally(() => rl.prompt());
   });
 
   rl.on("close", () => process.exit(0));
 }
 
-// ── Single task ───────────────────────────────────────────────────
+interface ReplContext {
+  state: ReplState;
+  registry: ToolRegistry;
+  setAgent: (agent: Agent) => void;
+  getAgent: () => Agent;
+}
+
+async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
+  const line = input.trim();
+  if (!line) return;
+  if (line === "/quit" || line === "/exit") {
+    console.log("\n  👋 Goodbye.\n");
+    process.exit(0);
+  }
+  if (line === "/clear") { console.clear(); return; }
+
+  // ── Command error boundary: recoverable errors keep the REPL alive ──
+  if (line.startsWith("/")) {
+    try {
+      await dispatchCommand(line, xo.state, xo.registry, (nextConfig) => {
+        xo.setAgent(wireAgentFor(nextConfig, xo.registry));
+      });
+    } catch (err: unknown) {
+      if (err instanceof RecoverableCliError) {
+        emitCliError("recoverable_command_error", `${err.name}: ${err.message}`);
+        renderRecoverableError(`${err.message} (provider stays: ${xo.state.committed.provider})`, err.action);
+      } else {
+        const msg = err instanceof Error ? err.message : String(err);
+        emitCliError("internal_command_error", msg);
+        console.error(`\n  ✗ Internal command error (logged): ${msg}`);
+        console.error("  The REPL stays alive. Please report this if it recurs.\n");
+      }
+    }
+    return;
+  }
+
+  // ── Agent turn ──
+  try {
+    const t0 = Date.now();
+    const agent = xo.getAgent();
+    const result = await agent.run(line);
+    const dt = Date.now() - t0;
+    let printed = false;
+    for (const m of result.messages) {
+      if (m.role === "assistant" && m.text) {
+        console.log(`\n${m.text}`);
+        printed = true;
+      } else if (m.role === "tool_result") {
+        const icon = m.isError ? "✗" : "✓";
+        const preview = m.content.length > 120 ? m.content.slice(0, 120) + "…" : m.content;
+        console.log(`  ${icon} ${m.toolName}: ${preview}`);
+      }
+    }
+    if (!printed) console.log("\n  (no response)");
+    console.log(`  ── ${result.turns}t ${result.usage.inputTokens}+${result.usage.outputTokens}tok ${dt}ms ──`);
+  } catch (err: unknown) {
+    if (err instanceof RecoverableCliError) {
+      renderRecoverableError(err.message, err.action);
+    } else {
+      const msg = err instanceof Error ? err.message : String(err);
+      emitCliError("agent_run_error", msg);
+      console.error(`\n  ✗ Agent error (logged): ${msg}\n`);
+    }
+  }
+}
+
+// ── Single task mode ─────────────────────────────────────────────
 
 async function runSingleTask(config: ProviderConfig, task: string): Promise<void> {
   const registry = createToolRegistry();
-  const agent = wireAgent(config, registry);
+  // Startup gate (fatal, entrypoint-level only): missing credentials for a
+  // non-interactive single task CANNOT be recovered interactively.
+  if (!(config.provider in PROVIDER_URLS) && config.provider !== "mock") {
+    console.error(`  ⚠  Unknown provider: ${config.provider}`);
+    process.exit(1);
+  }
+  if (!CREDENTIAL_LESS.has(config.provider) && !config.apiKey) {
+    console.error(`\n  ⚠  No API key for ${PROVIDER_NAMES[config.provider] ?? config.provider}.`);
+    console.error(`  → Add it to .env or run: pnpm agent, then /key ${config.provider} <key>\n`);
+    process.exit(1);
+  }
+  const agent = wireAgentFor(config, registry);
   const t0 = Date.now();
   const result = await agent.run(task);
   const dt = Date.now() - t0;
@@ -290,7 +420,38 @@ async function runSingleTask(config: ProviderConfig, task: string): Promise<void
   console.log(`\n─── ${result.turns} turns, ${result.usage.inputTokens}+${result.usage.outputTokens} tokens, ${dt}ms ───`);
 }
 
-// ── Main ──────────────────────────────────────────────────────────
+function createToolRegistry(): ToolRegistry {
+  const policy = { allowedRoots: [WORKSPACE, process.cwd()] };
+  const registry = new ToolRegistry();
+  for (const tool of createBuiltinTools(policy)) registry.register(tool);
+  return registry;
+}
+
+// ── Safety nets (entrypoint only, never inside core) ────────────
+
+let replActive = false;
+
+process.on("unhandledRejection", (reason) => {
+  const msg = reason instanceof Error ? reason.message : String(reason);
+  emitCliError("unhandled_rejection", msg);
+  if (replActive) {
+    console.error(`\n  ✗ [unhandledRejection, logged, still alive] ${msg}\n`);
+    process.stdout.write("⚡ > ");
+  } else {
+    console.error(`  ✗ Unhandled rejection: ${msg}`);
+  }
+});
+
+process.on("uncaughtException", (err) => {
+  emitCliError("uncaught_exception", err.message);
+  if (replActive) {
+    console.error(`\n  ✗ [uncaughtException, logged, still alive] ${err.message}\n`);
+    process.stdout.write("⚡ > ");
+  } else {
+    console.error(err);
+    process.exit(1);
+  }
+});
 
 function showHelp(): void {
   console.log(`
@@ -299,52 +460,41 @@ Elysium Harness — AI Agent
 Usage:
   pnpm agent                           Interactive REPL
   pnpm agent "do something"            Single task
-  pnpm agent --task "do something"     Same as above
   pnpm agent --provider mock           Force offline mock mode
   pnpm agent --help                    Show this help
 
-Slash commands (REPL):
-  /model                  Show current provider and model
-  /model <provider>       Switch provider
-  /model <provider> <m>   Switch provider and model
-  /connections            List all configured providers
-  /key <provider> <key>   Set API key
-  /tools                  List available tools
-  /workspace              Show workspace path
-  /clear                  Clear screen
-  /help                   This help
-  /quit                   Exit
-
-Providers (all OpenAI-compatible):
-  openai      GPT-4o, GPT-4o-mini, o1, o3
-  deepseek    DeepSeek V3, R1
-  groq        Llama 3, Mixtral, Gemma (some free)
-  glm         ZhiPu GLM (glm-5.3-flash)
-  opencode    OpenCode Go (Ollama cloud)
-  ollama      Local models
-  openrouter  100+ models via unified API
-  together    Llama, Mixtral, Qwen, etc.
-  mock        Offline deterministic mode
-
-Configure: copy .env.example to .env, or use /key command in REPL.
+Providers: openai | deepseek | groq | together | openrouter | glm | opencode | ollama | mock
+Configure: copy .env.example to .env, or /key <provider> <key> in the REPL.
 `);
 }
 
 async function main(): Promise<void> {
-  const { task, provider: providerOverride, help } = parseArgs(process.argv);
-  if (help) { showHelp(); return; }
-
+  const argv = process.argv.slice(2);
+  let taskArg: string | null = null;
+  let providerArg: string | null = null;
+  if (argv.includes("--help") || argv.includes("-h")) { showHelp(); return; }
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--task" && argv[i + 1]) { taskArg = argv[i + 1] ?? null; i += 1; continue; }
+    if (argv[i] === "--provider" && argv[i + 1]) { providerArg = argv[i + 1] ?? null; i += 1; continue; }
+    if (argv[i] && !argv[i]!.startsWith("-")) taskArg = argv[i];
+  }
   let config = loadConfig(PROJECT_ROOT);
-  if (providerOverride) config = { ...config, provider: providerOverride as ProviderName };
+  if (providerArg) config = { ...config, provider: providerArg as ProviderName };
 
-  if (task) {
-    await runSingleTask(config, task);
+  replActive = true;
+  if (taskArg) {
+    replActive = false;
+    await runSingleTask(config, taskArg);
   } else {
     await runRepl(config);
   }
 }
 
-main().catch((err: unknown) => {
-  console.error(err);
-  process.exit(1);
-});
+if (import.meta.url === `file://${process.argv[1]?.replace(/\\/g, "/")}`) {
+  main().catch((err: unknown) => {
+    console.error(err instanceof FatalError ? err.message : err);
+    process.exit(1);
+  });
+} else {
+  void main();
+}
