@@ -105,7 +105,7 @@ describe("EventBus", () => {
     bus.on((e) => {
       if (e.type === "custom") throw new Error("boom");
     });
-    const seen = [];
+    const seen: string[] = [];
     bus.on((e) => seen.push(e.type));
     bus.emit(makeEvent("custom", {}));
     expect(seen).toContain("error");

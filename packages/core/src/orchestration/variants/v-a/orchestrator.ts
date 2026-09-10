@@ -141,7 +141,12 @@ export class Orchestrator {
       goal: plan.goal,
       completedAt: nowIso(),
       subtasks: reports,
-      allPassed: reports.every((report) => report.result.status === "pass"),
+      // The critic (when configured) is the acceptance gate: a subtask only
+      // counts as passed if its spawn result passed AND its verdict passed.
+      allPassed: reports.every(
+        (report) =>
+          report.result.status === "pass" && (report.critic === undefined || report.critic.passed),
+      ),
       totalDurationMs: Date.now() - startedAtMs,
     };
   }
