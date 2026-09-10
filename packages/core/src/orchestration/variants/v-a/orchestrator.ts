@@ -59,9 +59,10 @@ function generateRunId(): string {
     timestampPart = RUN_ID_ALPHABET.charAt(time % 32) + timestampPart;
     time = Math.floor(time / 32);
   }
+  const bytes = randomBytes(16);
   let randomPart = "";
-  for (const byte of randomBytes(16)) {
-    randomPart += RUN_ID_ALPHABET.charAt(byte % 32);
+  for (let i = 0; i < bytes.length; i += 1) {
+    randomPart += RUN_ID_ALPHABET.charAt((bytes[i] ?? 0) % 32);
   }
   return timestampPart + randomPart;
 }

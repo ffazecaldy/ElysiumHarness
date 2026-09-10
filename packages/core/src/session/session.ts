@@ -162,19 +162,50 @@ export class Session {
   buildContext(options?: { includeMeta?: boolean }): AgentMessage[] {
     const includeMeta = options?.includeMeta ?? false;
     const branch = this.branch();
-    const covered = new Set<string>();
+    const branchIds = new Set(branch.map((e) => e.id));
+    // Map: summary entry -> first covered entry id present in the branch.
+    const summaryAnchor = new Map<string, string>();
+    const summariesByAnchor = new Map<string, SessionEntry>();
+    for (const e of branch) {
+      if (e.data.kind !== "summary") continue;
+      const covered = e.data.coversEntryIds.filter((id) => branchIds.has(id));
+      if (covered.length === 0) {
+        // Nothing covered in this branch: project in place.
+        summaryAnchor.set(e.id, e.id);
+        summariesByAnchor.set(e.id, e);
+        continue;
+      }
+      const first = covered.reduce((a, b) => (a < b ? a : b));
+      summaryAnchor.set(e.id, first);
+      summariesByAnchor.set(first, e);
+    }
+    const emitted = new Set<string>();
+    const coveredIds = new Set<string>();
     for (const e of branch) {
       if (e.data.kind === "summary") {
-        for (const id of e.data.coversEntryIds) covered.add(id);
+        for (const id of e.data.coversEntryIds) coveredIds.add(id);
       }
     }
     const messages: AgentMessage[] = [];
     for (const e of branch) {
-      if (covered.has(e.id)) continue;
+      const anchor = summariesByAnchor.get(e.id);
+      if (anchor !== undefined && e.data.kind !== "summary") {
+        // First covered position of a summary: emit the summary here.
+        const summary = anchor;
+        if (summary.data.kind === "summary" && !emitted.has(summary.id)) {
+          emitted.add(summary.id);
+          messages.push({ role: "user", content: `[compacted] ${summary.data.text}` });
+        }
+      }
       if (e.data.kind === "summary") {
-        messages.push({ role: "user", content: `[compacted] ${e.data.text}` });
+        // Summary emits at its anchor position, not here (unless it anchors to itself).
+        if (summaryAnchor.get(e.id) === e.id && !emitted.has(e.id)) {
+          emitted.add(e.id);
+          messages.push({ role: "user", content: `[compacted] ${e.data.text}` });
+        }
         continue;
       }
+      if (coveredIds.has(e.id)) continue;
       if (e.data.kind === "meta") {
         if (includeMeta) {
           messages.push({ role: "user", content: `[meta:${e.data.label}]` });
