@@ -6,8 +6,8 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Agent } from "@elysium/core/agent/variants/v-a/agent";
-import type { TurnResult } from "@elysium/core/agent/variants/v-a/agent";
+import { Agent } from "@elysium/core";
+import type { TurnResult } from "@elysium/core";
 import {
   MockProvider,
   QualityGate,

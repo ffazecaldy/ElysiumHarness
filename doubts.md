@@ -26,3 +26,7 @@ Open questions and risks. Each entry lists mitigation. Resolved items move to `i
 - (Phase 2) Provider 429 storms with 13 concurrent children → waves reduced to ≤ 5; orchestrator self-implements dead-agent modules (user rule: after two blocked rounds, do it yourself).
 - (Phase 3) Meta-Layer auto-evaluation raced test assertions (fire-and-forget) → serialized evaluation chain + `whenIdle()`; engine had a double-push bug (make() pushed + call site pushed again) → fixed, root-caused via direct tsx execution.
 - (Phase 3) vitest alias subpath resolution semantics → intra-package relative imports in meta-layer tests; aliases kept for exact package entries only.
+- (Phase 4) Security test found `RM -RF /` bypassing case-sensitive deny-list → policy regexes now compiled case-insensitive (real vulnerability, fixed in source).
+- (Phase 4) Security test found API key leaking through JSON.stringify(provider) — TS `private` is compile-time only → key stored in a module-level WeakMap, never an instance property (real vulnerability, fixed in source).
+- (Phase 4) tsconfig `rootDir` breaks cross-package source imports under noEmit verification → rootDir removed from all workspace packages (aliases verified by pnpm build).
+- (Phase 5) Benchmark child imported Agent from a variants subpath → canonical barrel import enforced repo-wide (grep: zero /variants/ imports outside the archive).
