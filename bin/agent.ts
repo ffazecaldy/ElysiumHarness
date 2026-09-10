@@ -9,11 +9,24 @@
  * Slash commands in REPL: /model /key /connections /tools /workspace /clear /help /quit
  *
  * Providers are configured in .env (see .env.example) or via /key.
+ * Credential precedence: real environment variables (ELYSIUM_*) win over
+ * the .env file values — documented in .env.example, implemented in the
+ * loadConfig() helper of packages/cli/src/config.ts. /key writes ONLY to
+ * .env — no new credentials file is introduced by this workstream.
  *
  * Error policy: recoverable errors (missing key, unknown provider, failed
  * switch) are caught by the command error boundary and displayed — the REPL
  * always keeps running. Only startup failures may terminate the process,
  * and only from this entrypoint.
+ *
+ * Ctrl+C (SIGINT) hardening:
+ *   - While a generation is in flight, the first SIGINT aborts that run
+ *     via Agent.abort() (which bridges to the per-run internal
+ *     AbortController in packages/core/src/agent/agent.ts — the external
+ *     AgentOptions.signal seam ALSO accepts one; abort() targets exactly
+ *     the in-flight run, whatever wired it) and returns to the prompt.
+ *     NOTHING in the agent path calls process.exit for a signal.
+ *   - Two SIGINTs within 3 seconds while IDLE exit the process (code 0).
  */
 import readline from "node:readline";
 import fs from "node:fs";
@@ -26,8 +39,8 @@ import {
   createBuiltinTools,
   MissingApiKeyError,
   ProviderInitializationError,
-  UnknownProviderError,
   RecoverableCliError,
+  UnknownProviderError,
   type ToolResultMessage,
   type ToolCallPart,
   makeEvent,
@@ -45,7 +58,15 @@ import {
   type ProviderName,
 } from "../packages/cli/src/config";
 
-const PROJECT_ROOT = path.resolve(import.meta.dirname, "..");
+/**
+ * PROJECT_ROOT governs where .env is read/written. The ELYSIUM_PROJECT_ROOT
+ * override exists ONLY so tests can redirect /key persistence to a
+ * disposable directory — the default remains the repo root that holds this
+ * entrypoint.
+ */
+const PROJECT_ROOT = process.env.ELYSIUM_PROJECT_ROOT
+  ? path.resolve(process.env.ELYSIUM_PROJECT_ROOT)
+  : path.resolve(import.meta.dirname, "..");
 const WORKSPACE = fs.mkdtempSync(path.join(
   process.env.TEMP || process.env.TMP || "/tmp",
   "elysium-",
@@ -155,6 +176,38 @@ function suggestProvider(name: string): string | null {
   return best && bestDist <= Math.max(2, Math.floor(name.length / 3)) ? best : null;
 }
 
+// ── Key validation + masking (never log/echo the full key) ───────
+
+const MIN_KEY_LENGTH = 8;
+
+/**
+ * Structural validation of an API key. Returns a human reason for
+ * rejection, or null when the key is acceptable. NEVER logs, prints, or
+ * forwards the key itself — only reason strings built from the key's
+ * *shape* (length, whitespace, quoting) reach output.
+ */
+function validateApiKey(key: string): string | null {
+  if (key.length < MIN_KEY_LENGTH) {
+    return `Key too short: ${key.length} chars (minimum ${MIN_KEY_LENGTH})`;
+  }
+  if (/\s/.test(key)) {
+    return "Key must not contain whitespace";
+  }
+  if (/["'`]/.test(key)) {
+    return "Key must not contain quote characters";
+  }
+  return null;
+}
+
+/**
+ * Non-reversible display mask: first 4 chars + ellipsis + last 4.
+ * A key shorter than the minimum is rejected before this can be called.
+ */
+function maskKey(key: string): string {
+  if (key.length < MIN_KEY_LENGTH) return "***";
+  return `${key.slice(0, 4)}…${key.slice(-4)}`;
+}
+
 // ── Command dispatcher (transactional provider switching) ────────
 
 interface ReplState {
@@ -183,7 +236,7 @@ async function dispatchCommand(
     /model <provider>       Switch provider (openai | deepseek | groq | together | openrouter | glm | opencode | ollama | mock)
     /model <provider> <m>   Switch provider and model
     /connections            Provider status table
-    /key <provider> <key>   Set API key (saved to .env, never echoed fully)
+    /key <provider> <key>   Set API key (>= 8 chars, saved to .env, never echoed fully)
     /tools                  List tools
     /workspace              Show workspace path
     /clear                  Clear screen
@@ -250,18 +303,23 @@ async function dispatchCommand(
     if (parts.length < 2) {
       throw new RecoverableCliError("Missing arguments", "Usage: /key <provider> <api-key>");
     }
+    if (parts.length > 2) {
+      throw new RecoverableCliError("Key must be a single token", "Usage: /key <provider> <api-key> — no spaces inside the key");
+    }
     const prov = parts[0]!;
-    const key = parts.slice(1).join(" ");
-    if (!(prov in PROVIDER_URLS)) {
+    const key = parts[1]!;
+    if (!(prov in PROVIDER_URLS) && prov !== "mock") {
       throw new UnknownProviderError(prov);
     }
-    if (key.length < 4) {
-      throw new RecoverableCliError("API key too short to be valid", `Usage: /key ${prov} <your-api-key>`);
+    // Validated BEFORE anything is persisted: a rejected key leaves the
+    // .env untouched and the committed provider unchanged.
+    const rejection = validateApiKey(key);
+    if (rejection !== null) {
+      throw new RecoverableCliError(rejection, `Usage: /key ${prov} <api-key> (>= 8 chars, no spaces, no quotes)`);
     }
     saveEnvValue(PROJECT_ROOT, "ELYSIUM_API_KEY", key);
     saveEnvValue(PROJECT_ROOT, "ELYSIUM_PROVIDER", prov);
-    const masked = key.slice(0, 6) + "***" + key.slice(-3);
-    console.log(`\n  ✅ Key saved for ${PROVIDER_NAMES[prov] ?? prov}: ${masked}`);
+    console.log(`\n  ✅ Key saved for ${PROVIDER_NAMES[prov] ?? prov} (${maskKey(key)})`);
     console.log(`  → Now switch: /model ${prov}\n`);
     return;
   }
@@ -294,7 +352,7 @@ async function dispatchCommand(
   }
 }
 
-// ── REPL loop with command error boundary ────────────────────────
+// ── REPL loop with command error boundary + Ctrl+C seam ──────────
 
 async function runRepl(startConfig: ProviderConfig): Promise<void> {
   const registry = createToolRegistry();
@@ -307,9 +365,14 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
   console.log("  ╚══════════════════════════════════════════╝\n");
   console.log(`  Provider: ${describeConfig(state.committed)}`);
   console.log(`  Workspace: ${WORKSPACE}`);
-  console.log("  Type /help for commands.\n");
+  console.log("  Type /help for commands.  Ctrl+C aborts the current run; twice to quit.\n");
 
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "⚡ > " });
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: "⚡ > ",
+    historySize: 100,
+  });
   rl.prompt();
 
   // Serialize line handling: piped readline fires faster than async
@@ -326,6 +389,51 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
   });
 
   rl.on("close", () => process.exit(0));
+
+  // ── Ctrl+C (SIGINT) seam: abort generation, not the process ──────
+  // The abort/target pair are registered by the agent-turn path below:
+  //   onRunStart(agent) — the runner says "this run is in flight NOW";
+  //   onRunEnd()        — the runner says "the run has settled".
+  // SIGINT: (1) if a run is in flight → agent.abort() once, report, return
+  // to prompt (NO process.exit — paths like the serial queue settle first);
+  // (2) idle → double-press within 3s exits, single press just warns.
+  // The handler is registered on BOTH the readline interface and the
+  // process: piped stdin delivers \x03 as a readline "SIGINT" event (no
+  // OS signal exists), while a real terminal raises OS-level SIGINT.
+  let inFlight: Agent | null = null;
+  let lastCtrlC = 0; // ms timestamp of previous SIGINT, for the 3s window
+  const DOUBLE_EXIT_WINDOW_MS = 3_000;
+
+  const onRunStart = (a: Agent): void => { inFlight = a; };
+  const onRunEnd = (): void => { inFlight = null; };
+
+  const handleSigint = (): void => {
+    const now = Date.now();
+    const running = inFlight;
+    if (running !== null) {
+      running.abort(); // per-run AbortController inside the core Agent loop
+      inFlight = null;
+      console.log("\n  ⚡ Generation aborted (Ctrl+C) — back at the prompt.\n");
+      rl.prompt();
+      return;
+    }
+    // Idle (no in-flight generation):
+    if (lastCtrlC > 0 && now - lastCtrlC < DOUBLE_EXIT_WINDOW_MS) {
+      process.exit(0);
+    }
+    lastCtrlC = now;
+    console.log("\n  ⚠️  Press Ctrl+C again within 3s to exit.\n");
+    rl.prompt();
+  };
+
+  rl.on("SIGINT", handleSigint);
+  process.on("SIGINT", handleSigint);
+
+  // Open the seam to the agent-turn path without a global.
+  (globalThis as { __elysiumRunSeam?: { start(a: Agent): void; end(): void } }).__elysiumRunSeam = {
+    start: onRunStart,
+    end: onRunEnd,
+  };
 }
 
 interface ReplContext {
@@ -368,7 +476,16 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
   try {
     const t0 = Date.now();
     const agent = xo.getAgent();
-    const result = await agent.run(line);
+    // Mark in-flight so SIGINT can abort exactly this run through the
+    // Agent.abort() seam (a per-run AbortController inside the core loop).
+    const seam = (globalThis as { __elysiumRunSeam?: { start(a: Agent): void; end(): void } }).__elysiumRunSeam;
+    seam?.start(agent);
+    let result;
+    try {
+      result = await agent.run(line);
+    } finally {
+      seam?.end();
+    }
     const dt = Date.now() - t0;
     let printed = false;
     for (const m of result.messages) {
@@ -382,7 +499,7 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
       }
     }
     if (!printed) console.log("\n  (no response)");
-    console.log(`  ── ${result.turns}t ${result.usage.inputTokens}+${result.usage.outputTokens}tok ${dt}ms ──`);
+    console.log(`  ── ${result.turns}t ${result.usage.inputTokens}+${result.usage.outputTokens}tok ${dt}ms${result.stopReason === "aborted" ? " (aborted)" : ""} ──`);
   } catch (err: unknown) {
     if (err instanceof RecoverableCliError) {
       renderRecoverableError(err.message, err.action);
@@ -465,6 +582,8 @@ Usage:
 
 Providers: openai | deepseek | groq | together | openrouter | glm | opencode | ollama | mock
 Configure: copy .env.example to .env, or /key <provider> <key> in the REPL.
+Precedence: ELYSIUM_* environment variables win over .env file values.
+Keys must be >= 8 chars and are shown masked (first 4 + … + last 4).
 `);
 }
 

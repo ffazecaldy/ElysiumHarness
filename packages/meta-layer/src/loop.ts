@@ -5,6 +5,7 @@
  */
 import type { EventBus, HarnessEvent } from "@elysium/core";
 import type { HypothesisEngine, OrchestrationConfig } from "./hypotheses/engine";
+import type { HypothesisStore } from "./store/hypothesis-store";
 import type { TelemetryStore } from "./store/telemetry-store";
 import type { Hypothesis } from "./types";
 
@@ -15,6 +16,8 @@ export interface MetaLayerOptions {
   applyConfig(next: OrchestrationConfig): Promise<void>;
   measure(metric: string): Promise<number>;
   evaluationInterval?: number;
+  /** Optional persistence for hypothesis lifecycle (proposals + transitions). */
+  hypothesisStore?: HypothesisStore;
 }
 
 export interface MetaLayerStats {
@@ -33,6 +36,7 @@ function isImprovement(metric: string, delta: number): boolean {
 
 export class MetaLayer {
   private readonly store: TelemetryStore;
+  private readonly hypothesisStore: HypothesisStore | null;
   private readonly engine: HypothesisEngine;
   private config: OrchestrationConfig;
   private readonly applyConfig: (next: OrchestrationConfig) => Promise<void>;
@@ -46,6 +50,7 @@ export class MetaLayer {
 
   constructor(options: MetaLayerOptions) {
     this.store = options.store;
+    this.hypothesisStore = options.hypothesisStore ?? null;
     this.engine = options.engine;
     this.config = { ...options.config };
     this.applyConfig = options.applyConfig;
@@ -91,8 +96,26 @@ export class MetaLayer {
         this.stats.errors += 1;
         const msg = err instanceof Error ? err.message : String(err);
         process.stderr.write(`[meta-layer] evaluation error: ${msg}\n`);
+        this.emitErrorEvent(msg);
       },
     );
+  }
+
+  /** Emit an "error" HarnessEvent on the attached bus, if any. */
+  private emitErrorEvent(message: string): void {
+    if (!this.bus) return;
+    const event: HarnessEvent = {
+      type: "error",
+      timestamp: new Date().toISOString(),
+      runId: "meta-layer",
+      data: { component: "meta-layer", message },
+    };
+    try {
+      this.bus.emit(event);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`[meta-layer] failed to emit error event: ${msg}\n`);
+    }
   }
 
   private async runEvaluation(): Promise<void> {
@@ -101,20 +124,33 @@ export class MetaLayer {
     const proposed = this.engine.observe(events);
     this.stats.hypothesesProposed += proposed.length;
     for (const hyp of proposed) {
-      const before = await this.measure(hyp.observation.metric);
-      const next = this.nextConfig(hyp);
-      await this.applyConfig(next);
-      this.engine.markApplied(hyp.id);
-      const after = await this.measure(hyp.observation.metric);
-      const delta = after - before;
-      if (isImprovement(hyp.observation.metric, delta)) {
-        this.engine.markPromoted(hyp.id, delta);
-        this.stats.promoted += 1;
-        this.config = next;
-      } else {
+      this.hypothesisStore?.append(hyp);
+      try {
+        const before = await this.measure(hyp.observation.metric);
+        const next = this.nextConfig(hyp);
+        await this.applyConfig(next);
+        this.engine.markApplied(hyp.id);
+        this.hypothesisStore?.update({ ...hyp, status: "applied" });
+        const after = await this.measure(hyp.observation.metric);
+        const delta = after - before;
+        if (isImprovement(hyp.observation.metric, delta)) {
+          this.engine.markPromoted(hyp.id, delta);
+          this.hypothesisStore?.update({ ...hyp, status: "promoted", delta });
+          this.stats.promoted += 1;
+          this.config = next;
+        } else {
+          await this.applyConfig({ ...this.config });
+          this.engine.markRejected(hyp.id, delta);
+          this.hypothesisStore?.update({ ...hyp, status: "rejected", delta });
+          this.stats.rejected += 1;
+        }
+      } catch (err) {
+        // Per-hypothesis failure: roll back, mark rejected, keep the loop alive
+        // so later hypotheses in the same batch still run.
         await this.applyConfig({ ...this.config });
-        this.engine.markRejected(hyp.id, delta);
-        this.stats.rejected += 1;
+        this.engine.markRejected(hyp.id, null);
+        this.hypothesisStore?.update({ ...hyp, status: "rejected", delta: null });
+        throw err;
       }
     }
   }

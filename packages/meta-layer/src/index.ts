@@ -2,6 +2,8 @@ export { MetaLayer } from "./loop";
 export type { MetaLayerOptions, MetaLayerStats } from "./loop";
 export { TelemetryStore } from "./store/telemetry-store";
 export type { TelemetryStoreOptions } from "./store/telemetry-store";
+export { HypothesisStore } from "./store/hypothesis-store";
+export type { HypothesisStoreOptions } from "./store/hypothesis-store";
 export {
   HypothesisEngine,
   isValidChange,

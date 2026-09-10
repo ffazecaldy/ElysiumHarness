@@ -48,6 +48,12 @@ Dependency rule: extensions depend on core; core depends on **nothing** (Node st
 3. **No secrets in code** — providers read credentials from `process.env` only; the harness never logs request headers.
 4. **Telemetry is local** — JSONL under `.elysium/`; no network egress except configured providers.
 5. **Depth cap** — orchestration cannot exceed depth 2 (type-level, see §2).
+6. **Error taxonomy** — recoverable CLI errors are typed classes exported from core (`core/src/types/errors.ts`, frozen contract):
+
+   - `RecoverableCliError` (base) — carries `action: string`, the concrete user step to recover. Subclasses: `ProviderConfigurationError` (→ `MissingApiKeyError`, which names `provider`), `UnknownProviderError` (names `provider`), `ProviderInitializationError`.
+   - `FatalError` is deliberately **not** a subclass of `RecoverableCliError`. It may be raised only by the CLI entrypoint (top-level handler) and only for genuine irrecoverable failures; core and extensions must never throw it.
+   - **No `process.exit` in core or in any mid-level handler.** Error-throwing factories (e.g. the provider factory) throw typed `RecoverableCliError`s; the REPL error boundary catches them, renders message + action, and keeps running. The process exits only at the entrypoint (`/quit`, SIGINT, uncaught fatal).
+   - Errors surface as structured bus events: `type: "error"`, `data: { scope, kind, message }` — `scope` names the emitting layer (e.g. `"cli"`), `kind` the class of failure (e.g. `recoverable_command_error`, `agent_run_error`), `message` the human-readable text. No secrets ever enter the payload. The normative `error` event shape in §5 consequently carries `{scope, kind, message}`.
 
 ## 5. Telemetry Format (normative)
 
@@ -61,7 +67,7 @@ Every event is one JSON line:
   "data": { "status": "pass", "durationMs": 1421, "tokens": { "inputTokens": 530, "outputTokens": 210 } }
 }
 ```
-Required `data` keys per type: `tool_called` → `{tool, durationMs, isError}`; `token_usage` → `{inputTokens, outputTokens}`; `latency` → `{scope: "turn"|"task"|"run", durationMs}`; `quality_evaluated` → `{weighted, passed}`; `error` → `{message, scope}`. The Meta-Layer persists exactly these lines — the format is the contract between core and meta-layer.
+Required `data` keys per type: `tool_called` → `{tool, durationMs, isError}`; `token_usage` → `{inputTokens, outputTokens}`; `latency` → `{scope: "turn"|"task"|"run", durationMs}`; `quality_evaluated` → `{weighted, passed}`; `error` → `{scope, kind, message}`. The Meta-Layer persists exactly these lines — the format is the contract between core and meta-layer.
 
 ## 6. Meta-Layer (extension) Loop
 
@@ -80,7 +86,7 @@ subscribe(eventBus) ──► TelemetryStore (JSONL, queryable by run/task/type/
 
 Hypothesis JSON (normative):
 ```json
-{ "id": "hyp_01J...", "observation": {"metric": "first_pass_rate", "value": 0.62, "window": "last_20_tasks"},
+{ "id": "hyp_01J...", "observation": {"metric": "first_pass_rate", "value": 0.62, "window": 20},
   "change": {"kind": "retry_policy", "from": {"maxRetries": 1}, "to": {"maxRetries": 2}},
   "expectedEffect": "first_pass_rate +0.05 or more",
   "status": "proposed", "delta": null }

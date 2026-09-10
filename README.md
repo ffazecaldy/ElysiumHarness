@@ -103,6 +103,27 @@ if (!score.passed) console.log(score.reasons);     // targeted retry feedback
 
 For live judging, swap in `createLlmJudge(provider)`.
 
+## Interactive agent (`pnpm agent`)
+
+`pnpm agent` starts a REPL (mock, offline mode until a real provider is configured with `/key` or `.env`). Commands:
+
+| Command | Behavior |
+|---|---|
+| `/model` | Show current provider/model and available providers |
+| `/model <provider>` | Switch provider (`openai`, `deepseek`, `groq`, `together`, `openrouter`, `glm`, `opencode`, `ollama`, `mock`) |
+| `/model <provider> <model>` | Switch provider and model |
+| `/key <provider> <key>` | Save an API key to `.env` (never echoed fully); then run `/model <provider>` to activate |
+| `/connections` | Provider status table (configured / key-required) |
+| `/tools` | List registered tools |
+| `/workspace` | Show the workspace path |
+| `/clear`, `/help`, `/quit` | Clear screen, help, exit |
+
+Provider switching is **transactional**: the target provider is built and validated *before* the live agent is touched. A failed switch (unknown provider, missing API key, initialization error) leaves the previous provider active and running — the REPL prints the error plus a suggested fix and stays alive.
+
+**Smart suggestions**: an unknown provider name gets a closest-match suggestion (edit-distance), e.g. `/model openIA` → *did you mean 'openai'?*.
+
+**Ctrl+C abort**: pressing Ctrl+C during an in-flight agent turn aborts the current turn (via the turn's `AbortSignal`) and returns to the prompt; the provider session and REPL state survive. Pressing it at the prompt exits cleanly.
+
 ## Meta-Layer (self-improvement loop, extension)
 
 The meta-layer subscribes to the event bus, persists telemetry verbatim (JSONL), aggregates observations (first-pass rate, latency), proposes **config-delta hypotheses** (never code patches), applies them under control, re-measures on held-out runs, and promotes only positive deltas (auto-rollback otherwise). See `docs/architecture.md` §5–6 for the normative event and hypothesis formats.

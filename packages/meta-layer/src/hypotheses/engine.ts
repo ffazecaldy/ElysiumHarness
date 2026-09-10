@@ -48,6 +48,21 @@ export class HypothesisEngine {
     this.minWindow = options?.minWindow ?? 5;
   }
 
+  /**
+   * Re-attach an already-known hypothesis without generating a new id.
+   * Used to restore persisted state after a restart.
+   */
+  restore(hypothesis: Hypothesis): void {
+    this.hypotheses.set(hypothesis.id, { ...hypothesis });
+  }
+
+  /** True when a non-rejected hypothesis exists with the same metric and change kind. */
+  private hasActive(metric: string, kind: HypothesisChange["kind"]): boolean {
+    return [...this.hypotheses.values()].some(
+      (h) => h.observation.metric === metric && h.change.kind === kind && h.status !== "rejected",
+    );
+  }
+
   observe(events: HarnessEvent[]): Hypothesis[] {
     const proposed: Hypothesis[] = [];
     const ended = events.filter((e) => e.type === "task_ended");
@@ -80,18 +95,22 @@ export class HypothesisEngine {
     };
 
     if (window >= this.minWindow && firstPass < this.firstPassThreshold) {
-      make(
-        { metric: "first_pass_rate", value: firstPass, window },
-        { kind: "retry_policy", from: { repairRounds: 1 }, to: { repairRounds: 2 } },
-        "first_pass_rate +0.05 or more on held-out re-run",
-      );
+      if (!this.hasActive("first_pass_rate", "retry_policy")) {
+        make(
+          { metric: "first_pass_rate", value: firstPass, window },
+          { kind: "retry_policy", from: { repairRounds: 1 }, to: { repairRounds: 2 } },
+          "first_pass_rate +0.05 or more on held-out re-run",
+        );
+      }
     }
     if (latencies.length >= this.minWindow && avgLatency > this.latencyThresholdMs) {
-      make(
-        { metric: "avg_task_latency_ms", value: avgLatency, window: latencies.length },
-        { kind: "max_concurrency", from: { maxConcurrency: 4 }, to: { maxConcurrency: 8 } },
-        "avg_task_latency_ms -20% or more on held-out re-run",
-      );
+      if (!this.hasActive("avg_task_latency_ms", "max_concurrency")) {
+        make(
+          { metric: "avg_task_latency_ms", value: avgLatency, window: latencies.length },
+          { kind: "max_concurrency", from: { maxConcurrency: 4 }, to: { maxConcurrency: 8 } },
+          "avg_task_latency_ms -20% or more on held-out re-run",
+        );
+      }
     }
     return proposed;
   }
@@ -117,7 +136,7 @@ export class HypothesisEngine {
     h.delta = delta;
   }
 
-  markRejected(id: string, delta: number): void {
+  markRejected(id: string, delta: number | null): void {
     const h = this.hypotheses.get(id);
     if (!h) throw new Error(`hypothesis not found: ${id}`);
     h.status = "rejected";

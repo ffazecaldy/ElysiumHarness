@@ -9,7 +9,15 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { Agent, MockProvider, Orchestrator, ToolRegistry, createBuiltinTools } from "@elysium/core";
+import {
+  Agent,
+  MockProvider,
+  Orchestrator,
+  ProviderInitializationError,
+  RecoverableCliError,
+  ToolRegistry,
+  createBuiltinTools,
+} from "@elysium/core";
 import type {
   AgentMessage,
   LlmProvider,
@@ -253,7 +261,15 @@ function createOpenAiCompatibleProvider(config: ProviderConfig): LlmProvider {
 /** Provider for a task run: configured endpoint if present, else a mock. */
 function makeTaskProvider(config: ProviderConfig, task: string): LlmProvider {
   if (config.baseUrl && config.apiKey && config.provider !== "ollama") {
-    return createOpenAiCompatibleProvider(config);
+    try {
+      return createOpenAiCompatibleProvider(config);
+    } catch (err: unknown) {
+      const message = err instanceof Error && err.message.length > 0 ? err.message : "provider initialization failed";
+      throw new ProviderInitializationError(
+        `openai-compatible provider init failed: ${message}`,
+        "Check the provider endpoint and API key configuration",
+      );
+    }
   }
   return new MockProvider([{ text: `echo: ${task}` }]);
 }
@@ -300,7 +316,7 @@ export async function runDemo(): Promise<void> {
 export async function runTask(task: string): Promise<void> {
   const trimmed = task.trim();
   if (trimmed.length === 0) {
-    throw new Error("task must not be empty");
+    throw new RecoverableCliError("task must not be empty", "Pass a non-empty task");
   }
   const config = loadConfig();
   const registry = new ToolRegistry();
@@ -326,21 +342,36 @@ function parseGoals(goalsJson: string): SubagentTask[] {
     parsed = JSON.parse(goalsJson);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`invalid goals JSON: ${message}`);
+    throw new RecoverableCliError(
+      `invalid goals JSON: ${message}`,
+      "Pass valid JSON like [{\"id\":\"a\",\"goal\":\"...\"}]",
+    );
   }
   if (!Array.isArray(parsed) || parsed.length === 0) {
-    throw new Error("goals must be a non-empty JSON array of {id, goal}");
+    throw new RecoverableCliError(
+      "goals must be a non-empty JSON array of {id, goal}",
+      "Pass an array like [{\"id\":\"a\",\"goal\":\"...\"}]",
+    );
   }
   return parsed.map((entry, index) => {
     if (typeof entry !== "object" || entry === null) {
-      throw new Error(`goals[${index}] must be an object with 'id' and 'goal'`);
+      throw new RecoverableCliError(
+        `goals[${index}] must be an object with 'id' and 'goal'`,
+        "Each entry needs string fields 'id' and 'goal'",
+      );
     }
     const record = entry as { id?: unknown; goal?: unknown };
     if (typeof record.id !== "string" || record.id.trim().length === 0) {
-      throw new Error(`goals[${index}].id must be a non-empty string`);
+      throw new RecoverableCliError(
+        `goals[${index}].id must be a non-empty string`,
+        "Set a unique non-empty 'id' for every entry",
+      );
     }
     if (typeof record.goal !== "string" || record.goal.trim().length === 0) {
-      throw new Error(`goals[${index}].goal must be a non-empty string`);
+      throw new RecoverableCliError(
+        `goals[${index}].goal must be a non-empty string`,
+        "Set a non-empty 'goal' description for every entry",
+      );
     }
     return { id: record.id, goal: record.goal };
   });
