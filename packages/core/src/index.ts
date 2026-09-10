@@ -17,9 +17,9 @@ export * from "./types/orchestration";
 
 // ---- IMPLEMENTATION MODULES ----
 // Agent loop variants (winner will be promoted to the canonical path in Phase 2 review)
-export * from "./agent/variants/v-a/agent";
+export * from "./agent/agent";
 // Orchestration variant (canonical executor currently under variant review)
-export * from "./orchestration/variants/v-b/orchestrator";
+export * from "./orchestration/orchestrator";
 // Providers
 export * from "./providers/mock-provider";
 export * from "./providers/registry";
