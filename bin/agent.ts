@@ -2,13 +2,21 @@
 /**
  * Elysium Harness — AI Agent CLI
  *
- * Usage:
- *   pnpm agent                     — interactive REPL
- *   pnpm agent --task "do something" — single task
- *   pnpm agent --provider mock      — force mock (offline)
- *   pnpm agent --help               — show help
+ *   pnpm agent                     Interactive REPL
+ *   pnpm agent "do something"      Single task
+ *   pnpm agent --help              Show help
  *
- * Configure providers via .env file (see .env.example).
+ * Slash commands in REPL:
+ *   /model [name]       Show or switch model
+ *   /connections        Show configured providers
+ *   /key <provider> <key>  Set API key for a provider
+ *   /tools              List available tools
+ *   /workspace          Show workspace path
+ *   /clear              Clear screen
+ *   /help               Show help
+ *   /quit               Exit
+ *
+ * Configure providers in .env (see .env.example).
  */
 import readline from "node:readline";
 import fs from "node:fs";
@@ -20,12 +28,19 @@ import {
   ToolRegistry,
   createBuiltinTools,
   type Tool,
-  type ToolContext,
   type ToolResultMessage,
   type ToolCallPart,
-  type HarnessEvent,
 } from "@elysium/core";
-import { loadConfig, describeConfig, type ProviderConfig } from "../packages/cli/src/config";
+import {
+  loadConfig,
+  saveEnvValue,
+  describeConfig,
+  PROVIDER_NAMES,
+  PROVIDER_MODELS,
+  PROVIDER_URLS,
+  type ProviderConfig,
+  type ProviderName,
+} from "../packages/cli/src/config";
 
 const PROJECT_ROOT = path.resolve(import.meta.dirname, "..");
 const WORKSPACE = fs.mkdtempSync(path.join(
@@ -33,19 +48,20 @@ const WORKSPACE = fs.mkdtempSync(path.join(
   "elysium-",
 ));
 
-const SYSTEM_PROMPT = `You are Elysium, an AI coding agent. You have access to tools for reading, writing, editing files, and executing commands. Use them when needed to fulfill the user's request. Be concise and direct. Always explain what you did.`;
+const SYSTEM_PROMPT =
+  "You are Elysium, an AI coding agent. You have access to tools for reading, writing, editing files, and executing commands. Use them when needed. Be concise and direct. Always explain what you did.";
+
+// ── Provider factory ──────────────────────────────────────────────
 
 function createProvider(config: ProviderConfig) {
   if (config.provider === "mock") {
     return new MockProvider([
-      { text: "I am running in mock mode (offline). Configure a real provider in .env to use a real LLM." },
+      { text: "I am running in mock mode (offline). Configure a real provider with /key or .env file." },
     ]);
   }
   if (!config.apiKey && config.provider !== "ollama") {
-    console.error(`\n  ⚠  No API key for ${config.provider}.`);
-    console.error(`  Copy .env.example to .env and add your key:\n`);
-    console.error(`    cp .env.example .env`);
-    console.error(`    # edit .env with your API key\n`);
+    console.error(`\n  ⚠  No API key for ${PROVIDER_NAMES[config.provider] ?? config.provider}.`);
+    console.error(`  Use: /key ${config.provider} <your-api-key>\n`);
     process.exit(1);
   }
   return new OpenAICompatibleProvider({
@@ -55,16 +71,17 @@ function createProvider(config: ProviderConfig) {
   });
 }
 
-function createTools(): Tool[] {
+// ── Tool wiring ───────────────────────────────────────────────────
+
+function createToolRegistry(): ToolRegistry {
   const policy = { allowedRoots: [WORKSPACE, process.cwd()] };
-  return createBuiltinTools(policy);
+  const registry = new ToolRegistry();
+  for (const tool of createBuiltinTools(policy)) registry.register(tool);
+  return registry;
 }
 
-function wireAgent(config: ProviderConfig): Agent {
+function wireAgent(config: ProviderConfig, registry: ToolRegistry): Agent {
   const provider = createProvider(config);
-  const registry = new ToolRegistry();
-  for (const tool of createTools()) registry.register(tool);
-
   return new Agent({
     systemPrompt: SYSTEM_PROMPT,
     provider,
@@ -73,15 +90,8 @@ function wireAgent(config: ProviderConfig): Agent {
     executeTool: async (call: ToolCallPart, ctx: { signal: AbortSignal }): Promise<ToolResultMessage> => {
       const tool = registry.get(call.name);
       if (!tool) {
-        return {
-          role: "tool_result",
-          toolCallId: call.id,
-          toolName: call.name,
-          content: `unknown tool: ${call.name}`,
-          isError: true,
-        };
+        return { role: "tool_result", toolCallId: call.id, toolName: call.name, content: `unknown tool: ${call.name}`, isError: true };
       }
-      const t0 = Date.now();
       try {
         const result = await tool.execute(call.arguments, {
           cwd: WORKSPACE,
@@ -89,25 +99,19 @@ function wireAgent(config: ProviderConfig): Agent {
           emit: () => undefined,
         });
         return {
-          role: "tool_result",
-          toolCallId: call.id,
-          toolName: call.name,
-          content: result.content,
-          isError: result.isError,
+          role: "tool_result", toolCallId: call.id, toolName: call.name,
+          content: result.content, isError: result.isError,
           ...(result.details !== undefined ? { details: result.details } : {}),
         };
       } catch (err: unknown) {
-        return {
-          role: "tool_result",
-          toolCallId: call.id,
-          toolName: call.name,
-          content: `error: ${err instanceof Error ? err.message : String(err)}`,
-          isError: true,
-        };
+        return { role: "tool_result", toolCallId: call.id, toolName: call.name,
+          content: `error: ${err instanceof Error ? err.message : String(err)}`, isError: true };
       }
     },
   });
 }
+
+// ── Args ──────────────────────────────────────────────────────────
 
 function parseArgs(argv: string[]): { task: string | null; provider: string | null; help: boolean } {
   let task: string | null = null;
@@ -115,110 +119,152 @@ function parseArgs(argv: string[]): { task: string | null; provider: string | nu
   let help = false;
   const args = argv.slice(2);
   for (let i = 0; i < args.length; i++) {
-    const arg = args[i];
-    if (arg === "--help" || arg === "-h") help = true;
-    else if (arg === "--task" && args[i + 1]) task = args[++i] ?? null;
-    else if (arg === "--provider" && args[i + 1]) provider = args[++i] ?? null;
-    else if (!arg.startsWith("-")) task = arg;
+    if (args[i] === "--help" || args[i] === "-h") help = true;
+    else if (args[i] === "--task" && args[i + 1]) task = args[++i] ?? null;
+    else if (args[i] === "--provider" && args[i + 1]) provider = args[++i] ?? null;
+    else if (!args[i]!.startsWith("-")) task = args[i];
   }
   return { task, provider, help };
 }
 
-function showHelp(): void {
+// ── REPL ──────────────────────────────────────────────────────────
+
+async function runRepl(config: ProviderConfig): Promise<void> {
+  const registry = createToolRegistry();
+  let agent = wireAgent(config, registry);
+
   console.log(`
-Elysium Harness — AI Agent
-
-Usage:
-  pnpm agent                           Interactive REPL
-  pnpm agent "do something"            Single task (then exit)
-  pnpm agent --task "do something"     Same as above
-  pnpm agent --provider mock           Force offline mock mode
-  pnpm agent --help                    Show this help
-
-Configuration:
-  Copy .env.example to .env and fill in your API key.
-  Supported: openai, deepseek, groq, together, openrouter, ollama, mock
-
-Workspace: ${WORKSPACE}
-  Files created by the agent land here (and in your cwd).
-`);
-}
-
-function printBanner(config: ProviderConfig): void {
-  console.log(`
-  ╔══════════════════════════════════════╗
-  ║     ⚡  Elysium Harness  ⚡         ║
-  ║     AI Agent with Tool Use          ║
-  ╚══════════════════════════════════════╝
+  ╔══════════════════════════════════════════╗
+  ║        ⚡  Elysium Harness  ⚡           ║
+  ║        AI Agent with Tool Use            ║
+  ╚══════════════════════════════════════════╝
 `);
   console.log(`  Provider: ${describeConfig(config)}`);
   console.log(`  Workspace: ${WORKSPACE}`);
-  console.log(`  Type /quit to exit, /tools to list tools.\n`);
-}
+  console.log(`  Type /help for commands.\n`);
 
-async function runSingleTask(agent: Agent, task: string): Promise<void> {
-  const t0 = Date.now();
-  const result = await agent.run(task);
-  const dt = Date.now() - t0;
-  for (const m of result.messages) {
-    if (m.role === "assistant" && m.text) {
-      console.log(`\n${m.text}`);
-    } else if (m.role === "tool_result") {
-      console.log(`  → [${m.toolName}] ${m.isError ? "✗ " : ""}${m.content.slice(0, 200)}`);
-    }
-  }
-  console.log(`\n─── ${result.turns} turns, ${result.usage.inputTokens}+${result.usage.outputTokens} tokens, ${dt}ms ───`);
-}
-
-async function runRepl(agent: Agent, config: ProviderConfig): Promise<void> {
-  printBanner(config);
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: "⚡ > ",
-  });
-
-  const tools = createTools();
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "⚡ > " });
   rl.prompt();
 
   rl.on("line", async (line: string) => {
     const input = line.trim();
     if (!input) { rl.prompt(); return; }
+
+    // ── Slash commands ──
     if (input === "/quit" || input === "/exit") {
-      console.log("\n  👋 Goodbye.\n");
-      process.exit(0);
+      console.log("\n  👋 Goodbye.\n"); process.exit(0);
+    }
+    if (input === "/clear") { console.clear(); rl.prompt(); return; }
+    if (input === "/help") {
+      console.log(`
+  Commands:
+    /model                  Show current provider and model
+    /model <provider>       Switch provider (openai, deepseek, groq, glm, opencode, ollama, mock)
+    /model <provider> <m>   Switch provider and model
+    /connections            List all configured providers and their status
+    /key <provider> <key>   Set API key (saved to .env)
+    /tools                  List available tools
+    /workspace              Show workspace path
+    /clear                  Clear screen
+    /help                   This help
+    /quit                   Exit
+`); rl.prompt(); return;
+    }
+    if (input === "/model") {
+      console.log(`\n  Current: ${describeConfig(config)}\n`);
+      console.log(`  Available providers:`);
+      for (const [k, v] of Object.entries(PROVIDER_NAMES)) {
+        const current = k === config.provider ? " ← active" : "";
+        console.log(`    ${k.padEnd(12)} ${v}${current}`);
+      }
+      console.log();
+      rl.prompt(); return;
+    }
+    if (input.startsWith("/model ")) {
+      const parts = input.slice(7).trim().split(/\s+/);
+      const newProvider = parts[0] as ProviderName;
+      const newModel = parts[1] || PROVIDER_MODELS[newProvider] || "";
+      if (!PROVIDER_URLS[newProvider]) {
+        console.log(`\n  ✗ Unknown provider: ${newProvider}\n`);
+        rl.prompt(); return;
+      }
+      const oldProvider = config.provider;
+      config = { ...config, provider: newProvider, baseUrl: PROVIDER_URLS[newProvider], model: newModel || PROVIDER_MODELS[newProvider] };
+      saveEnvValue(PROJECT_ROOT, "ELYSIUM_PROVIDER", newProvider);
+      if (newModel) saveEnvValue(PROJECT_ROOT, "ELYSIUM_MODEL", newModel);
+      saveEnvValue(PROJECT_ROOT, "ELYSIUM_BASE_URL", "");
+      // Rebuild agent with new provider
+      try {
+        agent = wireAgent(config, registry);
+        console.log(`\n  ✓ Switched to ${PROVIDER_NAMES[newProvider] ?? newProvider} | ${config.model}\n`);
+      } catch (err: unknown) {
+        console.log(`\n  ✗ ${err instanceof Error ? err.message : String(err)}\n`);
+        config = { ...config, provider: oldProvider };
+      }
+      rl.prompt(); return;
+    }
+    if (input.startsWith("/key ")) {
+      const parts = input.slice(5).trim().split(/\s+/);
+      if (parts.length < 2) { console.log(`\n  Usage: /key <provider> <api-key>\n`); rl.prompt(); return; }
+      const [prov, ...keyParts] = parts;
+      const key = keyParts.join(" ");
+      if (!PROVIDER_URLS[prov!]) {
+        console.log(`\n  ✗ Unknown provider: ${prov}. Use: /key <openai|deepseek|groq|glm|opencode|openrouter> <key>\n`);
+        rl.prompt(); return;
+      }
+      saveEnvValue(PROJECT_ROOT, "ELYSIUM_API_KEY", key);
+      saveEnvValue(PROJECT_ROOT, "ELYSIUM_PROVIDER", prov!);
+      if (!config.apiKey) config = { ...config, apiKey: key, provider: prov as ProviderName, baseUrl: PROVIDER_URLS[prov!] };
+      const masked = key.slice(0, 6) + "***" + key.slice(-3);
+      console.log(`\n  ✓ Key saved for ${PROVIDER_NAMES[prov!] ?? prov}: ${masked}\n`);
+      rl.prompt(); return;
+    }
+    if (input === "/connections") {
+      console.log(`\n  ┌─────────────┬──────────────────────┬────────────────────┬─────────────┐`);
+      console.log(`  │ Provider    │ Service              │ Model              │ Status      │`);
+      console.log(`  ├─────────────┼──────────────────────┼────────────────────┼─────────────┤`);
+      for (const [name, url] of Object.entries(PROVIDER_URLS)) {
+        const provConfig = name === config.provider ? config : { ...config, provider: name, baseUrl: url };
+        const key = name === config.provider ? config.apiKey : "";
+        const model = name === config.provider ? config.model : PROVIDER_MODELS[name] || "";
+        const status = name === config.provider ? "🟢 active" :
+          (name === "ollama" || name === "opencode") ? "⚪ local" :
+            key ? "🟢 configured" : "🔴 no key";
+        console.log(`  │ ${name.padEnd(11)} │ ${(PROVIDER_NAMES[name] || name).padEnd(20)} │ ${model.padEnd(18)} │ ${status.padEnd(11)} │`);
+      }
+      console.log(`  └─────────────┴──────────────────────┴────────────────────┴─────────────┘\n`);
+      rl.prompt(); return;
     }
     if (input === "/tools") {
-      console.log("\n  Available tools:");
-      for (const t of tools) {
-        console.log(`    ${t.name.padEnd(14)} ${t.description.slice(0, 60)}`);
+      console.log(`\n  Available tools:`);
+      for (const t of registry.list()) {
+        console.log(`    ${t.name.padEnd(14)} ${t.description.slice(0, 65)}`);
       }
       console.log(`\n  Workspace: ${WORKSPACE}\n`);
-      rl.prompt();
-      return;
+      rl.prompt(); return;
     }
-    if (input.startsWith("/workspace")) {
+    if (input === "/workspace") {
       console.log(`\n  ${WORKSPACE}\n`);
-      rl.prompt();
-      return;
+      rl.prompt(); return;
     }
 
+    // ── Agent turn ──
     try {
       const t0 = Date.now();
       const result = await agent.run(input);
       const dt = Date.now() - t0;
-      let printedAny = false;
+      let printed = false;
       for (const m of result.messages) {
         if (m.role === "assistant" && m.text) {
           console.log(`\n${m.text}`);
-          printedAny = true;
+          printed = true;
         } else if (m.role === "tool_result") {
           const icon = m.isError ? "✗" : "✓";
           const preview = m.content.length > 120 ? m.content.slice(0, 120) + "…" : m.content;
           console.log(`  ${icon} ${m.toolName}: ${preview}`);
         }
       }
-      if (!printedAny) console.log("\n  (no response)");
+      if (!printed) console.log("\n  (no response)");
       console.log(`  ── ${result.turns}t ${result.usage.inputTokens}+${result.usage.outputTokens}tok ${dt}ms ──`);
     } catch (err: unknown) {
       console.error(`\n  ✗ Error: ${err instanceof Error ? err.message : String(err)}\n`);
@@ -229,23 +275,72 @@ async function runRepl(agent: Agent, config: ProviderConfig): Promise<void> {
   rl.on("close", () => process.exit(0));
 }
 
+// ── Single task ───────────────────────────────────────────────────
+
+async function runSingleTask(config: ProviderConfig, task: string): Promise<void> {
+  const registry = createToolRegistry();
+  const agent = wireAgent(config, registry);
+  const t0 = Date.now();
+  const result = await agent.run(task);
+  const dt = Date.now() - t0;
+  for (const m of result.messages) {
+    if (m.role === "assistant" && m.text) console.log(`\n${m.text}`);
+    else if (m.role === "tool_result") console.log(`  → [${m.toolName}] ${m.isError ? "✗ " : ""}${m.content.slice(0, 200)}`);
+  }
+  console.log(`\n─── ${result.turns} turns, ${result.usage.inputTokens}+${result.usage.outputTokens} tokens, ${dt}ms ───`);
+}
+
+// ── Main ──────────────────────────────────────────────────────────
+
+function showHelp(): void {
+  console.log(`
+Elysium Harness — AI Agent
+
+Usage:
+  pnpm agent                           Interactive REPL
+  pnpm agent "do something"            Single task
+  pnpm agent --task "do something"     Same as above
+  pnpm agent --provider mock           Force offline mock mode
+  pnpm agent --help                    Show this help
+
+Slash commands (REPL):
+  /model                  Show current provider and model
+  /model <provider>       Switch provider
+  /model <provider> <m>   Switch provider and model
+  /connections            List all configured providers
+  /key <provider> <key>   Set API key
+  /tools                  List available tools
+  /workspace              Show workspace path
+  /clear                  Clear screen
+  /help                   This help
+  /quit                   Exit
+
+Providers (all OpenAI-compatible):
+  openai      GPT-4o, GPT-4o-mini, o1, o3
+  deepseek    DeepSeek V3, R1
+  groq        Llama 3, Mixtral, Gemma (some free)
+  glm         ZhiPu GLM (glm-5.3-flash)
+  opencode    OpenCode Go (Ollama cloud)
+  ollama      Local models
+  openrouter  100+ models via unified API
+  together    Llama, Mixtral, Qwen, etc.
+  mock        Offline deterministic mode
+
+Configure: copy .env.example to .env, or use /key command in REPL.
+`);
+}
+
 async function main(): Promise<void> {
   const { task, provider: providerOverride, help } = parseArgs(process.argv);
   if (help) { showHelp(); return; }
 
   let config = loadConfig(PROJECT_ROOT);
-  if (providerOverride) config = { ...config, provider: providerOverride as typeof config.provider };
-  if (config.provider !== "mock" && config.provider !== "ollama" && !config.apiKey) {
-    console.error(`  ⚠  No API key for ${config.provider}. Copy .env.example to .env and add your key.\n`);
-    process.exit(1);
-  }
-
-  const agent = wireAgent(config);
+  if (providerOverride) config = { ...config, provider: providerOverride as ProviderName };
 
   if (task) {
-    await runSingleTask(agent, task);
+    await runSingleTask(config, task);
   } else {
-    await runRepl(agent, config);
+    await runRepl(config);
   }
 }
 
