@@ -3,6 +3,13 @@
 Budget: **30 subagents total** (hard cap), depth ≤ 2, waves of ≤ 12 per phase.
 Orchestrator does foundation/contract code personally (never delegated).
 
+> **Status log (updated at end of each phase):**
+> - Phase 0 ✅ — docs + decisions.
+> - Phase 1 ✅ — architecture approved, scaffold green, contract frozen (commit 2927c8e).
+> - Phase 2 ✅ — core implemented. NOTE: provider 429 rate-limit storms killed 10/13 first-wave agents; orchestrator implemented providers/tools/session/events/quality/tests directly (fallback strategy per plan §Failure handling). Variant trio for Agent Loop + Orchestration completed (2 variants by children, 2 by orchestrator). External selector verdict: **Agent Loop = v-b (lean event-callback)** 8.95/10; **Orchestration = v-a (plan-graph executor)** 8.90/10; winners promoted to canonical paths, alternates archived under `variants/` with DQ notes. 34 tests green, demo e2e green.
+> - Phase 3 ✅ — Meta-Layer end-to-end on simulated events: telemetry store (JSONL, queryable), hypothesis engine (retry-policy + concurrency hypotheses, normative format), closed loop with serialized evaluation, controlled config application, held-out delta measurement, promote-only-positive (rollback verified by test). 34→34 tests green including 10 meta-layer tests.
+> - Phase 4 🔄 — wave dispatched: extension-tools, openai-compatible provider, tui+cli, integration+security tests, benchmarks scaffolding. Demo e2e (`pnpm demo`) verified green.
+
 ## Phase 0 — Bootstrap (orchestrator solo, 0 subagents)
 - prd.md, plan.md, ideas.md, doubts.md with concrete decisions.
 - **Done:** 4 files exist, contain architecture decisions, core/extension boundaries, metric definitions.

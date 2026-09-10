@@ -21,3 +21,8 @@ Open questions and risks. Each entry lists mitigation. Resolved items move to `i
 ## Resolved
 - (Phase 0) pnpm not installed → installed globally via npm 12.3.4.
 - (Phase 0) Repo remote exists with placeholder README → cloned, building in place.
+- (Phase 1) pnpm 12 blocks dependency build scripts by default → declared `pnpm.onlyBuiltDependencies` (biome, esbuild) in root package.json; vitest/biome verified working without postinstall anyway.
+- (Phase 2) Parallel variants initially assigned the same file path → resolved mid-flight via steer to per-variant dirs (`variants/v-x/`); one child file was accidentally overwritten by the orchestrator and restored from git commit `eaea84f` (no child work lost).
+- (Phase 2) Provider 429 storms with 13 concurrent children → waves reduced to ≤ 5; orchestrator self-implements dead-agent modules (user rule: after two blocked rounds, do it yourself).
+- (Phase 3) Meta-Layer auto-evaluation raced test assertions (fire-and-forget) → serialized evaluation chain + `whenIdle()`; engine had a double-push bug (make() pushed + call site pushed again) → fixed, root-caused via direct tsx execution.
+- (Phase 3) vitest alias subpath resolution semantics → intra-package relative imports in meta-layer tests; aliases kept for exact package entries only.
