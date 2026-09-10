@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- Elysium Harness mark: a harness ring around a spark core -->
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7c5cff"/>
+      <stop offset="1" stop-color="#2bd4c4"/>
+    </linearGradient>
+  </defs>
+  <!-- harness ring (open at the right: the harness guides, it does not cage) -->
+  <path d="M 44 10.5 A 24 24 0 1 0 44 53.5" fill="none" stroke="url(#g)" stroke-width="6" stroke-linecap="round"/>
+  <!-- core spark -->
+  <circle cx="32" cy="32" r="7" fill="url(#g)"/>
+  <!-- two extension nodes orbiting the core -->
+  <circle cx="32" cy="12" r="3.5" fill="#2bd4c4"/>
+  <circle cx="50" cy="43" r="3.5" fill="#7c5cff"/>
+</svg>
