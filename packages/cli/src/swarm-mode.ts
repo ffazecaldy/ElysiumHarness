@@ -1,0 +1,605 @@
+/**
+ * Swarmloop runtime mode — the "swarm goal" gauntlet loop as a callable seam.
+ *
+ * Pipeline (skill-faithful, depth ≤ 2):
+ *  1. PLANNING TURN — one direct LLM call decomposes the goal into at most
+ *     `maxSubtasks` subtasks with acceptance criteria (strict-JSON contract,
+ *     tolerantly extracted; falls back to a single subtask = the whole goal).
+ *  2. EXECUTION — an {@link Orchestrator} runs a real {@link Agent} per
+ *     subtask with the builtin tools scoped to a fresh per-RUN mkdtemp
+ *     workspace, bounded turns, concurrency 2 and 1 repair round.
+ *  3. CRITIC — a fresh-context LLM judge per attempt (only task + result),
+ *     tolerant parse defaulting to passed on unparseable output.
+ *  4. QUALITY GATE — structuralJudge per result vs its criteria; weighted
+ *     scores ride on the returned report.
+ *
+ * Error policy: every LLM/provider failure emits a SwarmEvent "error" first,
+ * then the original error is rethrown — rendering belongs to the caller.
+ * This module never terminates the process.
+ */
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
+import {
+  Agent,
+  type AgentMessage,
+  type CriticVerdict,
+  type GateArtifact,
+  type HarnessEvent,
+  type LlmProvider,
+  OpenAICompatibleProvider,
+  type OrchestrationPlan,
+  type OrchestrationReport,
+  Orchestrator,
+  QualityGate,
+  type SpawnFn,
+  type SubagentResult,
+  type SubagentTask,
+  ToolRegistry,
+  type ToolResultMessage,
+  createBuiltinTools,
+  createDefaultRubric,
+  structuralJudge,
+} from "@elysium/core";
+
+// ── Public seam ───────────────────────────────────────────────────
+
+/** The seven event kinds surfaced through {@link RunSwarmGoalOptions.onEvent}. */
+export type SwarmEventType =
+  | "plan"
+  | "task_started"
+  | "task_ended"
+  | "critic"
+  | "repair"
+  | "done"
+  | "error";
+
+/** Runtime-mode event. `data` payloads are kind-specific free-form records. */
+export interface SwarmEvent {
+  type: SwarmEventType;
+  data: Record<string, unknown>;
+}
+
+/** Provider coordinates shared by every LLM call of the run. */
+export interface SwarmProviderConfig {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+/** Options for {@link runSwarmGoal}. */
+export interface RunSwarmGoalOptions {
+  goal: string;
+  provider: SwarmProviderConfig;
+  /** Upper bound for the planner's subtask count. Default 3. */
+  maxSubtasks?: number;
+  /** Optional event sink for the whole gauntlet loop. */
+  onEvent?: (e: SwarmEvent) => void;
+}
+
+/** Per-subtask quality-gate outcome attached to the orchestration report. */
+export interface SwarmTaskScore {
+  taskId: string;
+  weighted: number;
+  passed: boolean;
+}
+
+/** What {@link runSwarmGoal} resolves with. */
+export interface SwarmGoalReport extends OrchestrationReport {
+  scores: SwarmTaskScore[];
+  /** Absolute path of the per-run scratch workspace (left in place for inspection). */
+  workspacePath: string;
+}
+
+// ── Internals ─────────────────────────────────────────────────────
+
+interface PlannedSubtask {
+  id: string;
+  goal: string;
+  acceptanceCriteria: string[];
+}
+
+const DEFAULT_MAX_SUBTASKS = 3;
+const BUILDER_MAX_TURNS = 6;
+const MAX_CONCURRENCY = 2;
+const REPAIR_ROUNDS = 1;
+/** Marker the Orchestrator appends to task context when re-spawning after critic gaps. */
+const REPAIR_MARKER = /Critic feedback, repair round (\d+)/;
+
+const JSON_ONLY_SYSTEM_PROMPT = "You output only valid JSON. No markdown fences, no commentary.";
+
+const BUILDER_SYSTEM_PROMPT = "You are a focused builder agent. Complete the subtask.";
+
+const GENERIC_CRITERIA = [
+  "The goal is fully addressed with concrete output",
+  "All produced artifacts are complete and non-placeholder",
+];
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Tolerant strict-JSON extraction: the first brace block of the text, found
+ * with string-aware brace matching so braces inside JSON strings are ignored.
+ */
+function extractFirstJsonBlock(text: string): string | null {
+  const start = text.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch === undefined) break;
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (ch === "\\") {
+        escaped = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+    } else if (ch === "{") {
+      depth += 1;
+    } else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
+/** One streaming completion reduced to its final assistant text. */
+async function completeOnce(
+  provider: LlmProvider,
+  systemPrompt: string,
+  prompt: string,
+): Promise<string> {
+  let text = "";
+  for await (const event of provider.stream({
+    systemPrompt,
+    messages: [{ role: "user", content: prompt }],
+    tools: [],
+  })) {
+    if (event.type === "text_delta") {
+      text += event.delta;
+    } else if (event.type === "done") {
+      text = event.message.text.length > 0 ? event.message.text : text;
+      break;
+    } else if (event.type === "error") {
+      throw event.error;
+    }
+  }
+  return text;
+}
+
+// ── Planning ──────────────────────────────────────────────────────
+
+function fallbackSubtask(goal: string): PlannedSubtask {
+  return {
+    id: "task-1",
+    goal,
+    acceptanceCriteria: [...GENERIC_CRITERIA],
+  };
+}
+
+function normalizePlannerSubtasks(parsed: unknown): PlannedSubtask[] {
+  if (!isRecord(parsed) || !Array.isArray(parsed.subtasks)) return [];
+  const out: PlannedSubtask[] = [];
+  for (const entry of parsed.subtasks) {
+    if (!isRecord(entry)) continue;
+    const id = entry.id;
+    const goal = entry.goal;
+    if (typeof id !== "string" || id.trim().length === 0) continue;
+    if (typeof goal !== "string" || goal.trim().length === 0) continue;
+    const rawCriteria = entry.acceptanceCriteria;
+    const criteria = Array.isArray(rawCriteria)
+      ? rawCriteria.filter(
+          (c: unknown): c is string => typeof c === "string" && c.trim().length > 0,
+        )
+      : [];
+    out.push({
+      id: id.trim(),
+      goal: goal.trim(),
+      acceptanceCriteria: criteria.length > 0 ? criteria : [...GENERIC_CRITERIA],
+    });
+  }
+  return out;
+}
+
+/** Guarantees unique subtask ids (the Orchestrator rejects duplicates). */
+function withUniqueIds(subtasks: PlannedSubtask[]): PlannedSubtask[] {
+  const seen = new Map<string, number>();
+  return subtasks.map((task) => {
+    const count = seen.get(task.id) ?? 0;
+    seen.set(task.id, count + 1);
+    if (count === 0) return task;
+    return { ...task, id: `${task.id}-${count + 1}` };
+  });
+}
+
+function parsePlannerOutput(
+  raw: string,
+  goal: string,
+  maxSubtasks: number,
+): { subtasks: PlannedSubtask[]; source: "llm" | "fallback" } {
+  const block = extractFirstJsonBlock(raw);
+  if (block !== null) {
+    try {
+      const parsed: unknown = JSON.parse(block);
+      const normalized = normalizePlannerSubtasks(parsed).slice(0, maxSubtasks);
+      if (normalized.length > 0) {
+        return { subtasks: withUniqueIds(normalized), source: "llm" };
+      }
+    } catch {
+      // Tolerant: fall through to the deterministic fallback plan.
+    }
+  }
+  return { subtasks: [fallbackSubtask(goal)], source: "fallback" };
+}
+
+function buildPlannerPrompt(goal: string, n: number): string {
+  return [
+    `Decompose the goal into EXACTLY ${n} subtasks (N no more than ${n}).`,
+    "Respond STRICT JSON: subtasks array of {id, goal, acceptanceCriteria array}",
+    "",
+    "GOAL:",
+    goal,
+  ].join("\n");
+}
+
+// ── Critic ────────────────────────────────────────────────────────
+
+function parseCriticVerdict(raw: string): CriticVerdict {
+  const block = extractFirstJsonBlock(raw);
+  if (block !== null) {
+    try {
+      const parsed: unknown = JSON.parse(block);
+      if (isRecord(parsed)) {
+        const passed = typeof parsed.passed === "boolean" ? parsed.passed : true;
+        const gaps = Array.isArray(parsed.gaps)
+          ? parsed.gaps.filter((g: unknown): g is string => typeof g === "string")
+          : [];
+        return { passed, gaps };
+      }
+    } catch {
+      // Tolerant: fall through to the default verdict.
+    }
+  }
+  return {
+    passed: true,
+    gaps: ["critic response was not valid JSON; defaulted to passed=true with no gaps"],
+  };
+}
+
+function buildCriticPrompt(task: SubagentTask, result: SubagentResult): string {
+  const lines: string[] = [
+    "Judge if the result satisfies the acceptance criteria.",
+    "Respond STRICT JSON {passed: boolean, gaps: string array}",
+    "",
+    `TASK: ${task.goal}`,
+  ];
+  const criteria = task.acceptanceCriteria ?? [];
+  if (criteria.length > 0) {
+    lines.push("", "ACCEPTANCE CRITERIA:");
+    for (const criterion of criteria) lines.push(`- ${criterion}`);
+  }
+  lines.push("", "RESULT:", result.summary);
+  if (result.artifacts.length > 0) {
+    lines.push("", "ARTIFACTS:");
+    for (const artifact of result.artifacts) lines.push(`- ${artifact}`);
+  }
+  return lines.join("\n");
+}
+
+// ── Builder agents ────────────────────────────────────────────────
+
+function buildBuilderPrompt(task: SubagentTask, workspace: string): string {
+  const lines: string[] = [`SUBTASK ${task.id}: ${task.goal}`];
+  const criteria = task.acceptanceCriteria ?? [];
+  if (criteria.length > 0) {
+    lines.push("", "Acceptance criteria:");
+    for (const criterion of criteria) lines.push(`- ${criterion}`);
+  }
+  if (task.context !== undefined && task.context.trim().length > 0) {
+    lines.push("", "Context:", task.context);
+  }
+  lines.push(
+    "",
+    `Work inside the workspace directory (${workspace}). Create real files for anything you produce. Finish with a concise summary of what you did.`,
+  );
+  return lines.join("\n");
+}
+
+function finalAssistantText(messages: AgentMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (message && message.role === "assistant" && message.text.trim().length > 0) {
+      return message.text.trim();
+    }
+  }
+  return null;
+}
+
+/** Recursive relative posix-path listing of every file under the workspace. */
+async function listWorkspaceFiles(root: string): Promise<Set<string>> {
+  const entries = await fs.readdir(root, { withFileTypes: true, recursive: true });
+  const out = new Set<string>();
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const absolute = path.join(entry.parentPath, entry.name);
+    out.add(path.relative(root, absolute).split(path.sep).join("/"));
+  }
+  return out;
+}
+
+// ── Main entry point ──────────────────────────────────────────────
+
+/**
+ * Runs the full swarm gauntlet for one goal: plan → parallel builder agents
+ * with fresh-context critic and bounded repair → structural quality gate.
+ * LLM/provider failures emit a SwarmEvent "error" and then rethrow.
+ */
+export async function runSwarmGoal(opts: RunSwarmGoalOptions): Promise<SwarmGoalReport> {
+  const maxSubtasks = Math.max(1, Math.floor(opts.maxSubtasks ?? DEFAULT_MAX_SUBTASKS));
+  const emitSwarm = (event: SwarmEvent): void => {
+    opts.onEvent?.(event);
+  };
+
+  // Fresh scratch workspace per RUN (all subtasks share it; left in place).
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "elysium-swarm-"));
+  const provider: LlmProvider = new OpenAICompatibleProvider({
+    baseUrl: opts.provider.baseUrl,
+    apiKey: opts.provider.apiKey,
+    model: opts.provider.model,
+  });
+
+  // ── (1) PLANNING TURN — single direct LLM call, tolerant parse ──
+  let planned: { subtasks: PlannedSubtask[]; source: "llm" | "fallback" };
+  try {
+    const raw = await completeOnce(
+      provider,
+      JSON_ONLY_SYSTEM_PROMPT,
+      buildPlannerPrompt(opts.goal, maxSubtasks),
+    );
+    planned = parsePlannerOutput(raw, opts.goal, maxSubtasks);
+  } catch (error: unknown) {
+    emitSwarm({
+      type: "error",
+      data: { scope: "planner", message: `planning LLM call failed: ${errorMessage(error)}` },
+    });
+    throw error;
+  }
+  const tasks: SubagentTask[] = planned.subtasks.map((subtask) => ({
+    id: subtask.id,
+    goal: subtask.goal,
+    acceptanceCriteria: subtask.acceptanceCriteria,
+  }));
+  emitSwarm({
+    type: "plan",
+    data: {
+      goal: opts.goal,
+      source: planned.source,
+      subtasks: tasks.map((task) => ({
+        id: task.id,
+        goal: task.goal,
+        acceptanceCriteria: task.acceptanceCriteria,
+      })),
+      workspacePath: workspace,
+    },
+  });
+
+  const plan: OrchestrationPlan = {
+    goal: opts.goal,
+    maxDepth: 2,
+    subtasks: tasks,
+    critic: { enabled: true, repairRounds: REPAIR_ROUNDS },
+  };
+
+  // Builtin tools scoped to the per-run workspace (same wiring as bin/agent.ts).
+  const registry = new ToolRegistry();
+  for (const tool of createBuiltinTools({ allowedRoots: [workspace] })) {
+    registry.register(tool);
+  }
+
+  // Artifact attribution: builders share the run workspace and run
+  // concurrently, so a naive before/after diff per spawn double-counts files
+  // created by siblings. Instead, after every successful tool call we diff the
+  // workspace and claim each newly seen file for exactly one task (first
+  // observer wins — in practice the creating task's own tool continuation).
+  const claimedArtifacts = new Map<string, string>();
+
+  const spawn: SpawnFn = async (task: SubagentTask): Promise<SubagentResult> => {
+    // Repair detection: the Orchestrator re-spawns with critic gaps appended
+    // to the task context — surface that as a repair event as it happens.
+    const repairMatch = REPAIR_MARKER.exec(task.context ?? "");
+    if (repairMatch !== null) {
+      emitSwarm({
+        type: "repair",
+        data: { taskId: task.id, round: Number(repairMatch[1] ?? 0) },
+      });
+    }
+
+    const knownFiles = await listWorkspaceFiles(workspace);
+    const taskArtifacts: string[] = [];
+
+    const executeTool = async (
+      call: { id: string; name: string; arguments: Record<string, unknown> },
+      ctx: { signal: AbortSignal },
+    ): Promise<ToolResultMessage> => {
+      const tool = registry.get(call.name);
+      if (!tool) {
+        return {
+          role: "tool_result",
+          toolCallId: call.id,
+          toolName: call.name,
+          content: `unknown tool: ${call.name}`,
+          isError: true,
+        };
+      }
+      try {
+        const result = await tool.execute(call.arguments, {
+          cwd: workspace,
+          signal: ctx.signal,
+          emit: () => {},
+        });
+        if (!result.isError) {
+          const afterFiles = await listWorkspaceFiles(workspace);
+          for (const file of afterFiles) {
+            if (knownFiles.has(file)) continue;
+            knownFiles.add(file);
+            if (!claimedArtifacts.has(file)) {
+              claimedArtifacts.set(file, task.id);
+              taskArtifacts.push(file);
+            }
+          }
+        }
+        return {
+          role: "tool_result",
+          toolCallId: call.id,
+          toolName: call.name,
+          content: result.content,
+          isError: result.isError,
+          ...(result.details !== undefined ? { details: result.details } : {}),
+        };
+      } catch (error: unknown) {
+        return {
+          role: "tool_result",
+          toolCallId: call.id,
+          toolName: call.name,
+          content: `error: ${errorMessage(error)}`,
+          isError: true,
+        };
+      }
+    };
+
+    const agent = new Agent({
+      systemPrompt: BUILDER_SYSTEM_PROMPT,
+      provider,
+      tools: registry.list(),
+      maxTurns: BUILDER_MAX_TURNS,
+      executeTool,
+    });
+
+    try {
+      const run = await agent.run(buildBuilderPrompt(task, workspace));
+      const summary = finalAssistantText(run.messages);
+      const completed = run.stopReason === "end_turn" && summary !== null;
+      return {
+        taskId: task.id,
+        status: completed ? "pass" : "partial",
+        summary: summary ?? "(no final assistant text)",
+        artifacts: [...taskArtifacts],
+      };
+    } catch (error: unknown) {
+      return {
+        taskId: task.id,
+        status: "fail",
+        summary: `agent run failed: ${errorMessage(error)}`,
+        artifacts: [],
+      };
+    }
+  };
+
+  // ── (3) CRITIC — fresh context: ONLY task + this attempt's result ──
+  const critic = async (task: SubagentTask, result: SubagentResult): Promise<CriticVerdict> => {
+    emitSwarm({ type: "critic", data: { taskId: task.id, phase: "start" } });
+    try {
+      const raw = await completeOnce(
+        provider,
+        JSON_ONLY_SYSTEM_PROMPT,
+        buildCriticPrompt(task, result),
+      );
+      const verdict = parseCriticVerdict(raw);
+      emitSwarm({
+        type: "critic",
+        data: {
+          taskId: task.id,
+          phase: "end",
+          passed: verdict.passed,
+          gaps: verdict.gaps,
+        },
+      });
+      return verdict;
+    } catch (error: unknown) {
+      // Surface the provider failure, then rethrow: the Orchestrator captures
+      // critic rejections as a failed verdict feeding the bounded repair loop.
+      emitSwarm({
+        type: "error",
+        data: {
+          taskId: task.id,
+          scope: "critic",
+          message: `critic LLM call failed: ${errorMessage(error)}`,
+        },
+      });
+      throw error;
+    }
+  };
+
+  // ── (2) EXECUTION — Orchestrator with concurrency 2, 1 repair round ──
+  const orchestrator = new Orchestrator({
+    spawn,
+    critic,
+    repairRounds: REPAIR_ROUNDS,
+    maxConcurrency: MAX_CONCURRENCY,
+    onEvent: (event: HarnessEvent): void => {
+      // Map orchestrator telemetry onto the runtime-mode event surface;
+      // latency-style events are not part of it and are dropped.
+      if (event.type === "task_started") {
+        emitSwarm({ type: "task_started", data: { taskId: event.taskId, ...event.data } });
+      } else if (event.type === "task_ended") {
+        emitSwarm({ type: "task_ended", data: { taskId: event.taskId, ...event.data } });
+      } else if (event.type === "error") {
+        emitSwarm({ type: "error", data: { taskId: event.taskId, ...event.data } });
+      }
+    },
+  });
+
+  const orchestration = await orchestrator.execute(plan);
+
+  // ── (5) QUALITY GATE — structuralJudge per result vs its criteria ──
+  const gate = new QualityGate({ judge: structuralJudge });
+  const rubric = createDefaultRubric();
+  const scores: SwarmTaskScore[] = [];
+  for (const subtask of orchestration.subtasks) {
+    const criteria = subtask.task.acceptanceCriteria;
+    // The gated artifact is the whole result — summary plus the artifacts the
+    // builder produced — mirroring exactly what the fresh-context critic saw.
+    const content =
+      subtask.result.artifacts.length > 0
+        ? `${subtask.result.summary}\n\nArtifacts:\n${subtask.result.artifacts.map((a) => `- ${a}`).join("\n")}`
+        : subtask.result.summary;
+    const artifact: GateArtifact = {
+      taskId: subtask.task.id,
+      kind: "text",
+      content,
+      ...(criteria !== undefined && criteria.length > 0 ? { criteria } : {}),
+    };
+    const score = await gate.evaluate(artifact, rubric);
+    scores.push({ taskId: subtask.task.id, weighted: score.weighted, passed: score.passed });
+  }
+
+  emitSwarm({
+    type: "done",
+    data: {
+      goal: orchestration.goal,
+      allPassed: orchestration.allPassed,
+      subtaskCount: orchestration.subtasks.length,
+      scores,
+      workspacePath: workspace,
+      totalDurationMs: orchestration.totalDurationMs,
+    },
+  });
+
+  return { ...orchestration, scores, workspacePath: workspace };
+}

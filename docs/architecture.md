@@ -92,11 +92,17 @@ Hypothesis JSON (normative):
   "status": "proposed", "delta": null }
 ```
 
-## 7. Core / Extension Boundary (definitive)
+## 7. CLI Layer
 
-**Core:** agent loop, tool system + 4 built-ins, session & state, orchestration primitives (depth ≤ 2), streaming quality gate, provider interface + mock, event bus.
+- **`bin/agent.ts`** — the presentation and recovery layer. It renders output, translates typed errors from core (`RecoverableCliError` subclasses, §4.6) via an error boundary into friendly messages + recovery actions, and keeps the REPL alive. No business logic lives here; core owns the loop.
+- **`bin/ui.ts`** — zero-dependency ANSI theme for the CLI (colors, borders, status line). `NO_COLOR`-aware: disables all styling when the variable is set.
+- **`packages/cli/src/swarm-mode.ts`** — Swarmloop mode runtime. Maps the Swarmloop skill's gauntlet profile (planner → parallel builders → fresh-context critic → one repair round → scored report) onto the core `Orchestrator` engine (§2). Exposed in the REPL as `/swarm <goal>`.
+
+## 8. Core / Extension Boundary (definitive)
+
+**Core:** agent loop, tool system + 4 built-ins, session & state, orchestration primitives (depth ≤ 2), streaming quality gate, provider interface + mock, event bus, typed CLI error classes.
 **Extensions:** meta-layer, extra tools (grep/glob/http-fetch), OpenAI adapter (network), TUI, benchmarks, CLI, anything else — forever.
 
-## 8. Measurement
+## 9. Measurement
 
 Defined in `plan.md` §Measurement: first-pass rate, token usage, latency, quality score (weights: correctness .30 / efficiency .30 / maintainability .20 / principles .20). Benchmarks compare against `docs/baseline.md`; no arbitrary numeric targets.

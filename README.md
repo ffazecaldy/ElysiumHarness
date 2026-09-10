@@ -105,24 +105,61 @@ For live judging, swap in `createLlmJudge(provider)`.
 
 ## Interactive agent (`pnpm agent`)
 
-`pnpm agent` starts a REPL (mock, offline mode until a real provider is configured with `/key` or `.env`). Commands:
+`pnpm agent` starts a professional REPL (mock, offline mode until a real provider is configured with `/key` or `.env`). Slash commands:
 
 | Command | Behavior |
 |---|---|
+| `/help` | List all commands |
 | `/model` | Show current provider/model and available providers |
 | `/model <provider>` | Switch provider (`openai`, `deepseek`, `groq`, `together`, `openrouter`, `glm`, `opencode`, `ollama`, `mock`) |
 | `/model <provider> <model>` | Switch provider and model |
-| `/key <provider> <key>` | Save an API key to `.env` (never echoed fully); then run `/model <provider>` to activate |
+| `/key <provider> <key>` | Save an API key to `.env` (always masked in output); then run `/model <provider>` to activate |
 | `/connections` | Provider status table (configured / key-required) |
 | `/tools` | List registered tools |
 | `/workspace` | Show the workspace path |
-| `/clear`, `/help`, `/quit` | Clear screen, help, exit |
+| `/status` | Session status line: provider/model, tool count, turns, messages |
+| `/history` | Show the conversation history of the current session |
+| `/clear-chat` | Clear the in-memory conversation (fresh chat, same REPL) |
+| `/save` | Save the current session to a JSONL file under `.elysium/sessions/` |
+| `/swarm <goal>` | Run the goal in Swarmloop mode (see below) |
+| `/quit` | Exit cleanly |
 
-Provider switching is **transactional**: the target provider is built and validated *before* the live agent is touched. A failed switch (unknown provider, missing API key, initialization error) leaves the previous provider active and running — the REPL prints the error plus a suggested fix and stays alive.
+**Streaming output**: assistant text arrives live, token by token, as the provider streams it — no waiting for the full turn.
 
-**Smart suggestions**: an unknown provider name gets a closest-match suggestion (edit-distance), e.g. `/model openIA` → *did you mean 'openai'?*.
+**Friendly provider errors**: provider failures are translated into plain messages with a suggested fix — out-of-credits, rate limit, bad API key, unreachable host (see the troubleshooting table below). The REPL never crashes on them.
 
-**Ctrl+C abort**: pressing Ctrl+C during an in-flight agent turn aborts the current turn (via the turn's `AbortSignal`) and returns to the prompt; the provider session and REPL state survive. Pressing it at the prompt exits cleanly.
+**Session status line**: a compact one-line summary (provider · model · tools · turns) is available via `/status` and shown where relevant, so you always know which provider and session state you are talking to.
+
+**Transactional provider switching**: the target provider is built and validated *before* the live agent is touched; a failed switch leaves the previous provider running. Unknown provider names get a closest-match suggestion (e.g. `/model openIA` → *did you mean 'openai'?*).
+
+**Ctrl+C abort**: pressing Ctrl+C during an in-flight agent turn aborts the current turn (via the turn's `AbortSignal`) and returns to the prompt; the provider session and REPL state survive. Pressing it at the prompt exits cleanly (two Ctrl+C within 3 seconds while idle also exits).
+
+## Swarmloop mode (`/swarm`)
+
+Swarmloop mode is a gauntlet-style orchestration profile built on the same depth-≤2 `Orchestrator` engine:
+
+1. **Plan** — your goal goes to a planner agent that decomposes it into subtasks.
+2. **Build** — parallel builder agents (with tool access) execute the subtasks.
+3. **Judge** — a fresh-context critic (sees only the artifact, never the builder's history) judges each result.
+4. **Repair** — failed results get exactly one repair round with the critic's gaps as feedback.
+5. **Report** — the final report carries per-subtask status, critic verdicts, and quality scores.
+
+Run it from the REPL: `/swarm your-goal`. The number of subtasks is capped (`maxSubtasks`), so a vague goal cannot fan out into an unbounded swarm; subtask concurrency and repair rounds follow the core `Orchestrator` defaults (`maxConcurrency` 4, `repairRounds` 1).
+
+## Provider troubleshooting
+
+| Symptom | Meaning | Fix |
+|---|---|---|
+| HTTP 429 with code `1113`, or a Chinese balance/balance-exhausted message | Account **out of credits** | Recharge at the provider console, or `/model` another provider |
+| Plain HTTP 429 | **Rate limit** (too many requests) | Wait and retry; slow down parallel work |
+| HTTP 401 / 403 | **Bad API key** | Re-set the key with `/key <provider> <key>` |
+| `fetch failed` | **Host unreachable** (network down, wrong base URL, provider outage) | Check connectivity and the provider endpoint, or `/model` another provider |
+
+## API keys
+
+- Keys live in `.env`, which is **gitignored** — they are never committed.
+- Keys are **always masked** in REPL output (`/key`, `/connections`, error messages).
+- If you ever pasted an API key into a chat (this one included), **rotate it** at the provider console and save the new one with `/key`.
 
 ## Meta-Layer (self-improvement loop, extension)
 
