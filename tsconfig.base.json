@@ -3,8 +3,12 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
-    "lib": ["ES2022"],
-    "types": ["node"],
+    "lib": [
+      "ES2022"
+    ],
+    "types": [
+      "node"
+    ],
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
@@ -17,13 +21,30 @@
     "sourceMap": true,
     "baseUrl": ".",
     "paths": {
-      "@elysium/core": ["packages/core/src/index.ts"],
-      "@elysium/core/*": ["packages/core/src/*"],
-      "@elysium/meta-layer": ["packages/meta-layer/src/index.ts"],
-      "@elysium/extension-tools": ["packages/extension-tools/src/index.ts"],
-      "@elysium/tui": ["packages/tui/src/index.ts"],
-      "@elysium/benchmarks": ["packages/benchmarks/src/index.ts"],
-      "@elysium/cli": ["packages/cli/src/index.ts"]
+      "@elysium/core": [
+        "packages/core/src/index.ts"
+      ],
+      "@elysium/core/*": [
+        "packages/core/src/*"
+      ],
+      "@elysium/meta-layer": [
+        "packages/meta-layer/src/index.ts"
+      ],
+      "@elysium/extension-tools": [
+        "packages/extension-tools/src/index.ts"
+      ],
+      "@elysium/tui": [
+        "packages/tui/src/index.ts"
+      ],
+      "@elysium/benchmarks": [
+        "packages/benchmarks/src/index.ts"
+      ],
+      "@elysium/cli": [
+        "packages/cli/src/index.ts"
+      ],
+      "@elysium/meta-layer/*": [
+        "packages/meta-layer/src/*"
+      ]
     }
   }
 }

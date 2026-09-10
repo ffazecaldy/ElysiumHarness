@@ -1,9 +1,11 @@
-/**
- * @elysium/meta-layer — Software Factory Meta-Layer (extension).
- * Observes structured telemetry, persists it queryably, generates
- * improvement hypotheses, applies them under control, measures deltas,
- * promotes only positive improvements. Model-agnostic, task-agnostic.
- *
- * NOTE: @elysium/core link is declared in package.json and lands with pnpm install.
- */
-export const META_LAYER_VERSION = "0.1.0";
+export { MetaLayer } from "./loop";
+export type { MetaLayerOptions, MetaLayerStats } from "./loop";
+export { TelemetryStore } from "./store/telemetry-store";
+export type { TelemetryStoreOptions } from "./store/telemetry-store";
+export {
+  HypothesisEngine,
+  isValidChange,
+  hypothesisTimestamp,
+} from "./hypotheses/engine";
+export type { HypothesisEngineOptions, OrchestrationConfig } from "./hypotheses/engine";
+export * from "./types";
