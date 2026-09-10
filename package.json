@@ -9,7 +9,10 @@
   },
   "packageManager": "pnpm@12.3.4",
   "pnpm": {
-    "onlyBuiltDependencies": ["@biomejs/biome", "esbuild"]
+    "onlyBuiltDependencies": [
+      "@biomejs/biome",
+      "esbuild"
+    ]
   },
   "scripts": {
     "build": "pnpm -r build",
@@ -18,7 +21,9 @@
     "typecheck": "tsc -p tsconfig.typecheck.json",
     "lint": "biome check .",
     "format": "biome format --write .",
-    "demo": "tsx examples/demo/run.ts"
+    "demo": "tsx examples/demo/run.ts",
+    "agent": "tsx bin/agent.ts",
+    "agent:mock": "tsx bin/agent.ts --provider mock"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
