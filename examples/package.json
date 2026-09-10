@@ -1,0 +1,13 @@
+{
+  "name": "elysium-examples",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Examples for Elysium Harness (offline demo on the mock provider).",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@elysium/core": "workspace:*"
+  }
+}
