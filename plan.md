@@ -1,0 +1,79 @@
+# Elysium Harness — Build Plan
+
+Budget: **30 subagents total** (hard cap), depth ≤ 2, waves of ≤ 12 per phase.
+Orchestrator does foundation/contract code personally (never delegated).
+
+## Phase 0 — Bootstrap (orchestrator solo, 0 subagents)
+- prd.md, plan.md, ideas.md, doubts.md with concrete decisions.
+- **Done:** 4 files exist, contain architecture decisions, core/extension boundaries, metric definitions.
+
+## Phase 1 — Architecture & Contracts (orchestrator solo + 1 doc agent)
+- `docs/architecture.md`: full architecture, public core interfaces, security model, state model, telemetry format.
+- Root scaffold: pnpm workspace, tsconfig strict base, biome, vitest, tsup — **build green before any dispatch**.
+- `PHASE_BUILD.md` at repo root: frozen API contract + ownership matrix (agents read this first).
+- **Done:** architecture doc scored ≥ 8.0 by evaluator agent; definitive core/extension list; scaffold compiles.
+
+## Phase 2 — Core Implementation (wave of 8)
+| # | Task | Owns (disjoint) |
+|---|------|-----------------|
+| A1 | Message/Provider types + streaming interface + `MockProvider` | `core/src/providers/`, `core/src/types/` |
+| A2 | Agent loop (`Agent` class, turn engine, steering/abort) | `core/src/agent/` |
+| A3 | Tool system (registry, `read`/`write`/`edit`/`bash`, policy) | `core/src/tools/` |
+| A4 | Session & state (JSONL append-only log, tree, checkpoint, branch, compaction) | `core/src/session/` |
+| A5 | Event/telemetry bus (typed emit/subscribe, ring buffer) | `core/src/events/` |
+| A6 | Orchestration engine (depth ≤ 2 planner, task graph, builder/critic) | `core/src/orchestration/` |
+| A7 | Quality gate (weighted rubric, streaming gate, score card) | `core/src/quality/` |
+| A8 | Core unit tests for A1–A5 surface + test fixtures | `core/test/` |
+
+Variant rule: A2 (Agent Loop) and A6 (Orchestration) get **3 independent implementations** each
+(wave of 6) + External Selector agent with fresh context (weights: Efficiency 70 / Code quality 20 /
+Usability-Reuse 10). Winner merged by orchestrator; losers archived under `variants/` docs.
+- **Done:** `core` compiles, unit tests green, public interfaces stable, evaluator score ≥ 8.0.
+
+## Phase 3 — Meta-Layer extension (wave of 4)
+| # | Task | Owns |
+|---|------|------|
+| B1 | Telemetry store (queryable JSONL + SQLite-optional) + data formats | `meta-layer/src/store/` |
+| B2 | Hypothesis engine (generate → apply controlled → measure delta → promote) | `meta-layer/src/hypotheses/` |
+| B3 | Meta-Layer orchestrator glue (subscribes to event bus, closed loop runner) | `meta-layer/src/loop.ts` |
+| B4 | Meta-Layer tests + simulated-event fixture end-to-end | `meta-layer/test/` |
+Variants: B2 gets 3 variants + selector (same weights).
+- **Done:** meta-layer runs end-to-end on simulated events; data format documented; tests green.
+
+## Phase 4 — Extensions & Integration (wave of 9)
+| # | Task | Owns |
+|---|------|------|
+| C1 | `extension-tools`: grep, glob, http-fetch tools | `extension-tools/src/` |
+| C2 | Provider adapters: OpenAI-compatible streaming adapter | `core/src/providers/openai/` |
+| C3 | TUI: REPL loop, renderer, streaming print | `tui/src/` |
+| C4 | CLI wiring: `elysium run/demo/orchestrate` commands | `cli/src/` |
+| C5 | Examples: offline demo task (mock provider), sample session | `examples/` |
+| C6 | Orchestrator+gate integration tests (depth-2 run on mock provider) | `core/test/integration/` |
+| C7 | Security tests: bash policy, path traversal, secret-scan | `core/test/security/` |
+| C8 | Docs: README + getting started (orchestrator drafts, agent expands) | `README.md`, `docs/` |
+| C9 | Eval harness scaffolding (dataset format, runner, scoring) | `benchmarks/src/` |
+- **Done:** end-to-end demo runs (`pnpm demo`), integration + security tests green.
+
+## Phase 5 — Benchmarks, Evals, Hardening (wave of 5)
+| # | Task |
+|---|------|
+| D1 | Benchmark scenarios (task suite on mock + optional live providers) |
+| D2 | Metrics collection + `docs/baseline.md` generation |
+| D3 | Evals: quality-gate calibration set with human-labeled examples |
+| D4 | Robustness fuzzing (malformed tool args, provider stream corruption) |
+| D5 | Hardening report + fixes |
+- **Done:** suite executable, results in `benchmarks/results/`, baseline documented.
+
+## Phase 6 — Polish & Identity (orchestrator + 2)
+- Logo SVG, final README, CONTRIBUTING, LICENSE (MIT), npm publish readiness check.
+- **Done:** repo usable by third parties from README alone.
+
+## Measurement definitions
+- **first-pass rate** = tasks accepted at quality gate on first attempt / total tasks (per benchmark run).
+- **token usage** = prompt + completion tokens per task/run (from provider usage or mock counter).
+- **latency** = wall-clock per turn and per task (ms), recorded on the event bus.
+- **quality score** = weighted rubric (correctness .30, efficiency .30, maintainability .20, principle-adherence .20), 0–10.
+
+## Failure handling
+Every phase: declared budget → if not converged: blocker report + simpler-strategy fallback proposal.
+Global stop condition: all phases done + repo complete + benchmark suite executable + docs sufficient to start from zero.
