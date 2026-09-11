@@ -16,6 +16,11 @@
  * Error policy: every LLM/provider failure emits a SwarmEvent "error" first,
  * then the original error is rethrown — rendering belongs to the caller.
  * This module never terminates the process.
+ *
+ * Visibility: builder streamed text is surfaced as "task_output" events
+ * (batched per line, ~200ms timer fallback) and every executed builder tool
+ * as a "task_tool" event, so callers can show what each subagent is doing
+ * while it runs.
  */
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -23,6 +28,7 @@ import path from "node:path";
 
 import {
   Agent,
+  type AgentEvent,
   type AgentMessage,
   type CriticVerdict,
   type GateArtifact,
@@ -45,11 +51,25 @@ import {
 
 // ── Public seam ───────────────────────────────────────────────────
 
-/** The seven event kinds surfaced through {@link RunSwarmGoalOptions.onEvent}. */
+/**
+ * The nine event kinds surfaced through {@link RunSwarmGoalOptions.onEvent}.
+ * Per-kind `data` payloads:
+ * - `plan`         → `{ goal, source, subtasks: [{id, goal, acceptanceCriteria}], workspacePath }`
+ * - `task_started` → `{ taskId, goal, ...orchestrator data }`
+ * - `task_ended`   → `{ taskId, status, durationMs, attempts }`
+ * - `task_output`  → `{ taskId, text }` — line-batched builder streamed text
+ * - `task_tool`    → `{ taskId, tool, isError }` — after each builder tool execution
+ * - `critic`       → `{ taskId, phase, passed?, gaps? }`
+ * - `repair`       → `{ taskId, round }`
+ * - `done`         → `{ goal, allPassed, subtaskCount, scores, workspacePath, totalDurationMs }`
+ * - `error`        → `{ scope, message, taskId? }`
+ */
 export type SwarmEventType =
   | "plan"
   | "task_started"
   | "task_ended"
+  | "task_output"
+  | "task_tool"
   | "critic"
   | "repair"
   | "done"
@@ -343,6 +363,58 @@ async function listWorkspaceFiles(root: string): Promise<Set<string>> {
   return out;
 }
 
+/** Fallback flush interval for {@link StreamLineBatcher} (anti-flood cadence). */
+const OUTPUT_FLUSH_MS = 200;
+
+/**
+ * Line-oriented text-delta batcher: accumulates streamed deltas and releases
+ * them one complete line at a time, so per-token provider updates never flood
+ * the event stream. A timer flushes any partial line after
+ * {@link OUTPUT_FLUSH_MS} of inactivity, and `flush()` drains the remainder
+ * when the stream ends.
+ */
+class StreamLineBatcher {
+  readonly #onLine: (text: string) => void;
+  readonly #flushEveryMs: number;
+  #buffer = "";
+  #timer: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(onLine: (text: string) => void, flushEveryMs: number = OUTPUT_FLUSH_MS) {
+    this.#onLine = onLine;
+    this.#flushEveryMs = flushEveryMs;
+  }
+
+  /** Appends a delta; emits one SwarmEvent per completed line immediately. */
+  push(delta: string): void {
+    this.#buffer += delta;
+    let newlineIndex = this.#buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = this.#buffer.slice(0, newlineIndex + 1);
+      this.#buffer = this.#buffer.slice(newlineIndex + 1);
+      this.#onLine(line);
+      newlineIndex = this.#buffer.indexOf("\n");
+    }
+    if (this.#buffer.length > 0 && this.#timer === null) {
+      this.#timer = setTimeout(() => {
+        this.#timer = null;
+        this.flush();
+      }, this.#flushEveryMs);
+    }
+  }
+
+  /** Emits any pending partial line and cancels the timer. Idempotent. */
+  flush(): void {
+    if (this.#timer !== null) {
+      clearTimeout(this.#timer);
+      this.#timer = null;
+    }
+    if (this.#buffer.length === 0) return;
+    const text = this.#buffer;
+    this.#buffer = "";
+    this.#onLine(text);
+  }
+}
+
 // ── Main entry point ──────────────────────────────────────────────
 
 /**
@@ -433,12 +505,18 @@ export async function runSwarmGoal(opts: RunSwarmGoalOptions): Promise<SwarmGoal
     const knownFiles = await listWorkspaceFiles(workspace);
     const taskArtifacts: string[] = [];
 
+    // Streamed builder text → line-batched "task_output" events for this task.
+    const batcher = new StreamLineBatcher((text: string): void => {
+      emitSwarm({ type: "task_output", data: { taskId: task.id, text } });
+    });
+
     const executeTool = async (
       call: { id: string; name: string; arguments: Record<string, unknown> },
       ctx: { signal: AbortSignal },
     ): Promise<ToolResultMessage> => {
       const tool = registry.get(call.name);
       if (!tool) {
+        emitSwarm({ type: "task_tool", data: { taskId: task.id, tool: call.name, isError: true } });
         return {
           role: "tool_result",
           toolCallId: call.id,
@@ -452,6 +530,10 @@ export async function runSwarmGoal(opts: RunSwarmGoalOptions): Promise<SwarmGoal
           cwd: workspace,
           signal: ctx.signal,
           emit: () => {},
+        });
+        emitSwarm({
+          type: "task_tool",
+          data: { taskId: task.id, tool: call.name, isError: result.isError },
         });
         if (!result.isError) {
           const afterFiles = await listWorkspaceFiles(workspace);
@@ -489,10 +571,22 @@ export async function runSwarmGoal(opts: RunSwarmGoalOptions): Promise<SwarmGoal
       tools: registry.list(),
       maxTurns: BUILDER_MAX_TURNS,
       executeTool,
+      onEvent: (agentEvent: AgentEvent): void => {
+        // Forward builder text deltas into the line batcher; tool visibility
+        // is emitted directly in `executeTool` (exact isError, one event per
+        // executed call).
+        if (agentEvent.kind === "text_delta") {
+          const data = agentEvent.data as { delta?: unknown };
+          if (typeof data.delta === "string" && data.delta.length > 0) {
+            batcher.push(data.delta);
+          }
+        }
+      },
     });
 
     try {
       const run = await agent.run(buildBuilderPrompt(task, workspace));
+      batcher.flush();
       const summary = finalAssistantText(run.messages);
       const completed = run.stopReason === "end_turn" && summary !== null;
       return {
@@ -502,6 +596,7 @@ export async function runSwarmGoal(opts: RunSwarmGoalOptions): Promise<SwarmGoal
         artifacts: [...taskArtifacts],
       };
     } catch (error: unknown) {
+      batcher.flush();
       return {
         taskId: task.id,
         status: "fail",
@@ -547,6 +642,9 @@ export async function runSwarmGoal(opts: RunSwarmGoalOptions): Promise<SwarmGoal
   };
 
   // ── (2) EXECUTION — Orchestrator with concurrency 2, 1 repair round ──
+  const taskGoalById = new Map<string, string>();
+  for (const task of tasks) taskGoalById.set(task.id, task.goal);
+
   const orchestrator = new Orchestrator({
     spawn,
     critic,
@@ -556,7 +654,14 @@ export async function runSwarmGoal(opts: RunSwarmGoalOptions): Promise<SwarmGoal
       // Map orchestrator telemetry onto the runtime-mode event surface;
       // latency-style events are not part of it and are dropped.
       if (event.type === "task_started") {
-        emitSwarm({ type: "task_started", data: { taskId: event.taskId, ...event.data } });
+        emitSwarm({
+          type: "task_started",
+          data: {
+            taskId: event.taskId,
+            goal: taskGoalById.get(event.taskId ?? "") ?? "",
+            ...event.data,
+          },
+        });
       } else if (event.type === "task_ended") {
         emitSwarm({ type: "task_ended", data: { taskId: event.taskId, ...event.data } });
       } else if (event.type === "error") {

@@ -6,7 +6,7 @@
  *   pnpm agent "do something"      Single task
  *   pnpm agent --help              Show help
  *
- * Slash commands in REPL: /model /key /connections /tools /workspace /clear /help /quit
+ * Slash commands in REPL: /mode /model /key /connections /tools /workspace /clear /help /quit
  *
  * Providers are configured in .env (see .env.example) or via /key.
  * Credential precedence: real environment variables (ELYSIUM_*) win over
@@ -91,6 +91,72 @@ const WORKSPACE = fs.mkdtempSync(path.join(
 const SYSTEM_PROMPT =
   "You are Elysium, an AI coding agent. You have access to tools for reading, writing, editing files, and executing commands. Use them when needed. Be concise and direct. Always explain what you did.";
 
+// ── Effort modes (/mode) ──────────────────────────────────────────
+
+/** Elysium intensity mode — a session-only effort dial, never persisted. */
+export type Mode = "min" | "medium" | "high" | "max";
+
+const VALID_MODES: readonly Mode[] = ["min", "medium", "high", "max"];
+
+/** Type guard: is this raw user input one of the four effort modes? */
+function isMode(value: string): value is Mode {
+  return (VALID_MODES as readonly string[]).includes(value);
+}
+
+/** Per-mode budget: turn/subtask/repair caps, tool-line visibility, prompt tail. */
+interface ModeConfig {
+  label: string;
+  maxTurns: number;
+  maxSubtasks: number;
+  repairRounds: number;
+  showToolOutput: boolean;
+  systemPromptSuffix: string;
+}
+
+const MODES: Record<Mode, ModeConfig> = {
+  min: {
+    label: "min - fast answers, no subagents",
+    maxTurns: 4,
+    maxSubtasks: 1,
+    repairRounds: 0,
+    showToolOutput: false,
+    systemPromptSuffix: " Be terse.",
+  },
+  medium: {
+    label: "medium - balanced",
+    maxTurns: 8,
+    maxSubtasks: 3,
+    repairRounds: 1,
+    showToolOutput: true,
+    systemPromptSuffix: "",
+  },
+  high: {
+    label: "high - thorough, more repair",
+    maxTurns: 12,
+    maxSubtasks: 5,
+    repairRounds: 2,
+    showToolOutput: true,
+    systemPromptSuffix: " Think step by step and verify your work before answering.",
+  },
+  max: {
+    label: "max - maximum effort",
+    maxTurns: 16,
+    maxSubtasks: 6,
+    repairRounds: 2,
+    showToolOutput: true,
+    systemPromptSuffix:
+      " Think step by step, verify your work, consider edge cases, and double-check the result before answering.",
+  },
+};
+
+/** Active effort mode. Session-only: nothing here is written to .env. */
+let currentMode: Mode = "medium";
+
+/** System prompt for the current mode: base prompt + the mode's suffix. */
+function systemPromptForMode(): string {
+  return SYSTEM_PROMPT + MODES[currentMode].systemPromptSuffix;
+}
+
 // ── Session stats (for /status /history /save) ────────────────────
 
 interface SessionStats {
@@ -163,10 +229,12 @@ function wireAgentFor(
 ): Agent {
   const provider = makeProvider(config);
   return new Agent({
-    systemPrompt: SYSTEM_PROMPT,
+    // maxTurns comes from the active effort mode; the system prompt is the
+    // base prompt with the mode's suffix appended (empty for medium).
+    systemPrompt: systemPromptForMode(),
     provider,
     tools: registry.list(),
-    maxTurns: 8,
+    maxTurns: MODES[currentMode].maxTurns,
     executeTool: async (call, ctx): Promise<ToolResultMessage> => {
       const tool = registry.get(call.name);
       if (!tool) {
@@ -194,6 +262,9 @@ function wireAgentFor(
           process.stdout.write(dim(d));
         }
       } else if (e.kind === "tool_result") {
+        // Live tool lines are the mode's showToolOutput dial: min keeps the
+        // transcript quiet (text still streams), other modes show the gear.
+        if (!MODES[currentMode].showToolOutput) return;
         const m = (e.data as { message?: ToolResultMessage }).message;
         if (m) {
           const status = m.isError ? red("err") : green("ok");
@@ -294,6 +365,7 @@ async function dispatchCommand(
     console.log(`
   ${cyan("Session")}
     /status                 Provider, model, tokens, uptime
+    /mode [min|medium|high|max]  Effort mode (default medium)
     /history                Prompts from this session
     /save                   Write transcript as markdown to the workspace
     /clear-chat             Reset conversation (fresh agent)
@@ -324,6 +396,30 @@ async function dispatchCommand(
       console.log(`    ${(k === state.committed.provider ? "* " : "  ")}${k.padEnd(12)} ${v}`);
     }
     console.log();
+    return;
+  }
+  if (input === "/mode" || input.startsWith("/mode ")) {
+    const arg = input.slice(5).trim();
+    if (arg.length === 0) {
+      // Table of the 4 modes; asterisk marks the active one.
+      console.log(`\n  Effort modes (session-only, not saved to .env):`);
+      for (const m of VALID_MODES) {
+        const active = m === currentMode;
+        console.log(`    ${active ? "*" : " "} ${m.padEnd(8)} ${MODES[m].label}`);
+      }
+      console.log(`\n  ${dim("Switch with /mode <name>")}\n`);
+      return;
+    }
+    if (!isMode(arg)) {
+      throw new RecoverableCliError(
+        `Unknown mode: ${arg}`,
+        `Valid modes: ${VALID_MODES.join(" | ")} — usage: /mode <name>`,
+      );
+    }
+    currentMode = arg;
+    // Rebuild so maxTurns and the suffixed system prompt take effect.
+    if (xo) xo.setAgent(wireAgentFor(xo.committed(), registry));
+    console.log(`\n  ${green(marks.ok)} Mode: ${MODES[currentMode].label}\n`);
     return;
   }
   if (input.startsWith("/model ")) {
@@ -492,6 +588,7 @@ async function dispatchCommand(
       const report = await runSwarmGoal({
         goal,
         provider: providerCfg,
+        maxSubtasks: MODES[currentMode].maxSubtasks,
         onEvent: (e: SwarmEvent) => {
           if (e.type === "plan") {
             sp.stop("plan ready");
@@ -551,6 +648,8 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
   console.log();
   console.log(kv("provider", describeConfig(state.committed)));
   console.log(kv("workspace", WORKSPACE));
+  console.log(kv("mode", MODES[currentMode].label));
+  console.log(kv("tools", "read write edit bash"));
   console.log(`  ${dim("Type /help for commands. Ctrl+C aborts a run; twice to quit.\n")}`);
 
   const rl = readline.createInterface({
@@ -712,6 +811,15 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
       if (lastA && lastA.role === "assistant") xo.stats.transcript.push({ role: "assistant", text: lastA.text });
     }
     console.log(`  ${dim(`─ ${result.turns} turns · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out tok · ${dt}ms${result.stopReason === "aborted" ? " · aborted" : ""}`)}`);
+    // Closing summary line: turn count, token totals, tokens/sec (output
+    // tokens over wall-clock seconds, 1 decimal), wall time. Aborted runs
+    // are flagged so partial output is never mistaken for a full answer.
+    // A sub-millisecond run divides by zero — show an em dash rate instead
+    // of Infinity.
+    const tokensPerSec = dt > 0 ? (result.usage.outputTokens / (dt / 1000)).toFixed(1) : "—";
+    const seconds = (dt / 1000).toFixed(1);
+    const abortedSuffix = result.stopReason === "aborted" ? " | aborted" : "";
+    console.log(`  ${dim(`-- ${result.turns} turns | ${result.usage.inputTokens} in / ${result.usage.outputTokens} out tok | ${tokensPerSec} tok/s | ${seconds}s${abortedSuffix}`)}`);
   } catch (err: unknown) {
     if (err instanceof RecoverableCliError) {
       renderRecoverableError(err.message, err.action);
