@@ -60,6 +60,7 @@ import {
 import {
   dim,
   bold,
+  white,
   cyan,
   green,
   red,
@@ -89,7 +90,12 @@ const WORKSPACE = fs.mkdtempSync(path.join(
 ));
 
 const SYSTEM_PROMPT =
-  "You are Elysium, an AI coding agent. You have access to tools for reading, writing, editing files, and executing commands. Use them when needed. Be concise and direct. Always explain what you did.";
+  "You are Elysium, an AI coding agent. " +
+  "SCOPE DISCIPLINE (highest priority): do EXACTLY what the user asks - nothing more. " +
+  "If the user asks to ANALYZE, read, explain, summarize, or tabulate something, respond with the analysis ONLY: do NOT create files, do NOT write code, do NOT start a project, do NOT run commands beyond what the task requires. " +
+  "Create or modify files ONLY when the user explicitly asks to create/modify/write something. " +
+  "When the task is done, stop: do not volunteer extra features, follow-ups, or improvements. " +
+  "Be concise and direct. State what you did in one line only if you used tools.";
 
 // ── Effort modes (/mode) ──────────────────────────────────────────
 
@@ -241,7 +247,7 @@ function wireAgentFor(
         return { role: "tool_result", toolCallId: call.id, toolName: call.name, content: `unknown tool: ${call.name}`, isError: true };
       }
       try {
-        const result = await tool.execute(call.arguments, { cwd: WORKSPACE, signal: ctx.signal, emit: (e) => eventBus.emit(e) });
+        const result = await tool.execute(call.arguments, { cwd: process.cwd(), signal: ctx.signal, emit: (e) => eventBus.emit(e) });
         return {
           role: "tool_result", toolCallId: call.id, toolName: call.name,
           content: result.content, isError: result.isError,
@@ -252,24 +258,24 @@ function wireAgentFor(
           content: `error: ${err instanceof Error ? err.message : String(err)}`, isError: true };
       }
     },
-    // Live streaming: text deltas print as they arrive; tool calls print
-    // a one-line gear summary. Kept dim so the final answer stands out.
+    // Live streaming: the ANSWER prints in normal readable color (white);
+    // tool activity prints as compact dim status lines. Never dim the answer.
     onEvent: (e) => {
       if (e.kind === "text_delta") {
         const d = (e.data as { delta?: string }).delta ?? "";
         if (d) {
           liveStreamed = true;
-          process.stdout.write(dim(d));
+          process.stdout.write(white(d));
         }
       } else if (e.kind === "tool_result") {
         // Live tool lines are the mode's showToolOutput dial: min keeps the
-        // transcript quiet (text still streams), other modes show the gear.
+        // transcript quiet (text still streams), other modes show status.
         if (!MODES[currentMode].showToolOutput) return;
         const m = (e.data as { message?: ToolResultMessage }).message;
         if (m) {
           const status = m.isError ? red("err") : green("ok");
           const preview = m.content.length > 90 ? m.content.slice(0, 90) + "…" : m.content;
-          console.log(`  ${dim("tool")} ${cyan(m.toolName)} ${status}  ${dim(preview.replace(/\n/g, " "))}`);
+          console.log(`\n  ${dim("tool " + m.toolName + " " + status + "  " + preview.replace(/\n/g, " "))}`);
         }
       }
     },
@@ -647,7 +653,8 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
   console.log(box("ELYSIUM", "AI agent with tool use"));
   console.log();
   console.log(kv("provider", describeConfig(state.committed)));
-  console.log(kv("workspace", WORKSPACE));
+  console.log(kv("cwd", process.cwd()));
+  console.log(kv("artifacts", WORKSPACE));
   console.log(kv("mode", MODES[currentMode].label));
   console.log(kv("tools", "read write edit bash"));
   console.log(`  ${dim("Type /help for commands. Ctrl+C aborts a run; twice to quit.\n")}`);
@@ -664,15 +671,34 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
   // handlers settle, so /quit could otherwise exit before earlier
   // commands finish (this caused the original "silent no-op" symptom).
   let lineQueue: Promise<void> = Promise.resolve();
+  let working = false; // a run is in flight
+  let warnedThisRun = false;
   rl.on("line", (raw: string) => {
+    if (working) {
+      // The agent is generating. Queue typed-ahead lines (so /quit is never
+      // lost) but warn once per run that a new task cannot start mid-run.
+      const t = raw.trim();
+      if (t.length > 0 && !warnedThisRun) {
+        warnedThisRun = true;
+        console.log(`\n  ${yellow(marks.warn)} Elysium is working — "${t === "/quit" ? "/quit" : "input"}" queued; Esc cancels the run.\n`);
+      }
+      lineQueue = lineQueue.then(() => handleReplLine(raw, { state, registry, stats, setAgent: (a) => { agent = a; }, getAgent: () => agent, setWorking: (w) => { working = w; } }))
+        .catch(() => undefined);
+      return;
+    }
+    working = true;
     lineQueue = lineQueue
-      .then(() => handleReplLine(raw, { state, registry, stats, setAgent: (a) => { agent = a; }, getAgent: () => agent }))
+      .then(() => handleReplLine(raw, { state, registry, stats, setAgent: (a) => { agent = a; }, getAgent: () => agent, setWorking: (w) => { working = w; } }))
       .catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         if (msg === "readline was closed") return; // stdin EOF race after last line: benign
         console.error(`\n  ${marks.err} Command loop error: ${msg}\n`);
       })
-      .finally(() => rl.prompt());
+      .finally(() => {
+        working = false;
+        warnedThisRun = false;
+        rl.prompt();
+      });
   });
 
   // stdin EOF (piped input or Ctrl+D): wait for the line queue to settle —
@@ -722,6 +748,27 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
   rl.on("SIGINT", handleSigint);
   process.on("SIGINT", handleSigint);
 
+  // ── Esc key: abort the in-flight run; double-Esc (idle) exits ──
+  // readline only emits keypress events when we opt in:
+  readline.emitKeypressEvents(process.stdin, rl);
+  if (process.stdin.isTTY) process.stdin.setRawMode(true);
+  let lastEsc = 0;
+  process.stdin.on("keypress", (_ch: string, key: { name?: string; ctrl?: boolean } | undefined) => {
+    if (!key || key.name !== "escape") return;
+    const now = Date.now();
+    const running = inFlight;
+    if (running !== null) {
+      running.abort();
+      inFlight = null;
+      console.log(`\n  ${yellow(marks.warn)} Generation cancelled (Esc) — back at the prompt.`);
+      rl.prompt();
+      return;
+    }
+    // Idle: double-Esc within 3s exits (mirrors double-Ctrl+C).
+    if (lastEsc > 0 && now - lastEsc < 3_000) process.exit(0);
+    lastEsc = now;
+  });
+
   // Open the seam to the agent-turn path without a global.
   (globalThis as { __elysiumRunSeam?: { start(a: Agent): void; end(): void } }).__elysiumRunSeam = {
     start: onRunStart,
@@ -735,6 +782,7 @@ interface ReplContext {
   stats: SessionStats;
   setAgent: (agent: Agent) => void;
   getAgent: () => Agent;
+  setWorking: (working: boolean) => void;
 }
 
 async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
@@ -771,16 +819,19 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
     const t0 = Date.now();
     const agent = xo.getAgent();
     xo.stats.prompts.push(line);
-    // Mark in-flight so SIGINT can abort exactly this run through the
+    // Mark in-flight so SIGINT/Esc can abort exactly this run through the
     // Agent.abort() seam (a per-run AbortController inside the core loop).
     const seam = (globalThis as { __elysiumRunSeam?: { start(a: Agent): void; end(): void } }).__elysiumRunSeam;
     seam?.start(agent);
+    xo.setWorking(true);
+    console.log(`  ${dim("working... (Esc to cancel)")}`);
     liveStreamed = false;
     let result;
     try {
       result = await agent.run(line);
     } finally {
       seam?.end();
+      xo.setWorking(false);
     }
     const dt = Date.now() - t0;
     if (liveStreamed) {
