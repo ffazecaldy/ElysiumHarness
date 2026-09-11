@@ -184,6 +184,7 @@ function newSessionStats(): SessionStats {
  * when the content was already streamed.
  */
 let liveStreamed = false;
+let inThink = false;
 
 // ── Event bus (shared: meta-layer & CLI both consume) ─────────────
 
@@ -265,7 +266,34 @@ function wireAgentFor(
         const d = (e.data as { delta?: string }).delta ?? "";
         if (d) {
           liveStreamed = true;
-          process.stdout.write(white(d));
+          // Thinking-aware rendering: content inside <think>...</think> (or a
+          // leading "Ragionamento:/Thinking:" block) is rendered dim so the
+          // actual answer stands out. State machine over the stream.
+          let rest = d;
+          while (rest.length > 0) {
+            if (inThink) {
+              const end = rest.indexOf("</think>");
+              if (end >= 0) {
+                process.stdout.write(dim(rest.slice(0, end)));
+                rest = rest.slice(end + 8);
+                inThink = false;
+                process.stdout.write("\n");
+              } else {
+                process.stdout.write(dim(rest));
+                rest = "";
+              }
+            } else {
+              const start = rest.indexOf("<think>");
+              if (start >= 0) {
+                process.stdout.write(white(rest.slice(0, start)));
+                inThink = true;
+                rest = rest.slice(start + 7);
+              } else {
+                process.stdout.write(white(rest));
+                rest = "";
+              }
+            }
+          }
         }
       } else if (e.kind === "tool_result") {
         // Live tool lines are the mode's showToolOutput dial: min keeps the
@@ -826,6 +854,7 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
     xo.setWorking(true);
     console.log(`  ${dim("working... (Esc to cancel)")}`);
     liveStreamed = false;
+    inThink = false;
     let result;
     try {
       result = await agent.run(line);
@@ -861,7 +890,7 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
       xo.stats.transcript.push({ role: "user", text: line });
       if (lastA && lastA.role === "assistant") xo.stats.transcript.push({ role: "assistant", text: lastA.text });
     }
-    console.log(`  ${dim(`─ ${result.turns} turns · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out tok · ${dt}ms${result.stopReason === "aborted" ? " · aborted" : ""}`)}`);
+    
     // Closing summary line: turn count, token totals, tokens/sec (output
     // tokens over wall-clock seconds, 1 decimal), wall time. Aborted runs
     // are flagged so partial output is never mistaken for a full answer.
@@ -870,7 +899,9 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
     const tokensPerSec = dt > 0 ? (result.usage.outputTokens / (dt / 1000)).toFixed(1) : "—";
     const seconds = (dt / 1000).toFixed(1);
     const abortedSuffix = result.stopReason === "aborted" ? " | aborted" : "";
-    console.log(`  ${dim(`-- ${result.turns} turns | ${result.usage.inputTokens} in / ${result.usage.outputTokens} out tok | ${tokensPerSec} tok/s | ${seconds}s${abortedSuffix}`)}`);
+        const secs = dt / 1000;
+    const tps = secs > 0 ? (result.usage.outputTokens / secs).toFixed(1) : "-";
+    console.log(`  ${dim(`─ ${result.turns} turn${result.turns === 1 ? "" : "s"} · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out · ${tps} tok/s · ${(dt / 1000).toFixed(1)}s${result.stopReason === "aborted" ? " · aborted" : ""}`)}`);
   } catch (err: unknown) {
     if (err instanceof RecoverableCliError) {
       renderRecoverableError(err.message, err.action);
