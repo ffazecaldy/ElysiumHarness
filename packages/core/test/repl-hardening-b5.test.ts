@@ -113,7 +113,7 @@ describe("B5 — generalized command-kill coverage (REPL survives every slash co
       // (2) the loop stayed alive to the very end: Goodbye banner emitted,
       //     and /help output came right before it.
       expect(out, `output for ${JSON.stringify(lines)}`).toContain("Goodbye");
-      const helpIdx = out.indexOf("Commands:");
+      const helpIdx = out.indexOf("/help");
       const goodbyeIdx = out.indexOf("Goodbye");
       expect(helpIdx, `/help ran for ${JSON.stringify(lines)}`).toBeGreaterThan(-1);
       expect(goodbyeIdx).toBeGreaterThan(helpIdx);

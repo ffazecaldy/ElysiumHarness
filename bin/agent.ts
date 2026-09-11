@@ -57,6 +57,20 @@ import {
   type ProviderConfig,
   type ProviderName,
 } from "../packages/cli/src/config";
+import {
+  dim,
+  cyan,
+  green,
+  red,
+  yellow,
+  icons,
+  box,
+  hr,
+  kv,
+  spinner,
+  translateProviderError,
+} from "./ui";
+import { runSwarmGoal, type SwarmEvent } from "../packages/cli/src/swarm-mode";
 
 /**
  * PROJECT_ROOT governs where .env is read/written. The ELYSIUM_PROJECT_ROOT
@@ -74,6 +88,28 @@ const WORKSPACE = fs.mkdtempSync(path.join(
 
 const SYSTEM_PROMPT =
   "You are Elysium, an AI coding agent. You have access to tools for reading, writing, editing files, and executing commands. Use them when needed. Be concise and direct. Always explain what you did.";
+
+// ── Session stats (for /status /history /save) ────────────────────
+
+interface SessionStats {
+  startedAt: number;
+  prompts: string[];
+  tokensIn: number;
+  tokensOut: number;
+  turns: number;
+  transcript: Array<{ role: string; text: string }>;
+}
+
+function newSessionStats(): SessionStats {
+  return { startedAt: Date.now(), prompts: [], tokensIn: 0, tokensOut: 0, turns: 0, transcript: [] };
+}
+
+/**
+ * Set by the Agent onEvent callback while streaming live (TTY only).
+ * The run path resets it before each run and skips the replay loop
+ * when the content was already streamed.
+ */
+let liveStreamed = false;
 
 // ── Event bus (shared: meta-layer & CLI both consume) ─────────────
 
@@ -118,7 +154,11 @@ function assertSwitchable(candidate: ProviderConfig): void {
   }
 }
 
-function wireAgentFor(config: ProviderConfig, registry: ToolRegistry): Agent {
+function wireAgentFor(
+  config: ProviderConfig,
+  registry: ToolRegistry,
+  hooks?: { stats?: SessionStats },
+): Agent {
   const provider = makeProvider(config);
   return new Agent({
     systemPrompt: SYSTEM_PROMPT,
@@ -140,6 +180,24 @@ function wireAgentFor(config: ProviderConfig, registry: ToolRegistry): Agent {
       } catch (err: unknown) {
         return { role: "tool_result", toolCallId: call.id, toolName: call.name,
           content: `error: ${err instanceof Error ? err.message : String(err)}`, isError: true };
+      }
+    },
+    // Live streaming: text deltas print as they arrive; tool calls print
+    // a one-line gear summary. Kept dim so the final answer stands out.
+    onEvent: (e) => {
+      if (e.kind === "text_delta") {
+        const d = (e.data as { delta?: string }).delta ?? "";
+        if (d) {
+          liveStreamed = true;
+          process.stdout.write(dim(d));
+        }
+      } else if (e.kind === "tool_result") {
+        const m = (e.data as { message?: ToolResultMessage }).message;
+        if (m) {
+          const icon = m.isError ? red(icons.err) : green(icons.ok);
+          const preview = m.content.length > 90 ? m.content.slice(0, 90) + "…" : m.content;
+          console.log(`  ${icons.gear} ${cyan(m.toolName)} ${icon} ${dim(preview.replace(/\n/g, " "))}`);
+        }
       }
     },
   });
@@ -227,18 +285,30 @@ async function dispatchCommand(
   state: ReplState,
   registry: ToolRegistry,
   rebuildAgent: (config: ProviderConfig) => void,
+  xo?: { stats: SessionStats; setAgent: (a: Agent) => void; committed: () => ProviderConfig },
 ): Promise<void> {
   // /quit and /clear are handled by the caller (process-level).
   if (input === "/help") {
     console.log(`
-  Commands:
+  ${cyan("Session")}
+    /status                 Provider, model, tokens, uptime
+    /history                Prompts from this session
+    /save                   Write transcript as markdown to the workspace
+    /clear-chat             Reset conversation (fresh agent)
+
+  ${cyan("Providers")}
     /model                  Show current provider and model
-    /model <provider>       Switch provider (openai | deepseek | groq | together | openrouter | glm | opencode | ollama | mock)
+    /model <provider>       Switch (openai | deepseek | groq | together | openrouter | glm | opencode | ollama | mock)
     /model <provider> <m>   Switch provider and model
     /connections            Provider status table
     /key <provider> <key>   Set API key (>= 8 chars, saved to .env, never echoed fully)
+
+  ${cyan("Agent")}
+    /swarm <goal>           Gauntlet mode: plan -> builders -> critic -> repair
     /tools                  List tools
     /workspace              Show workspace path
+
+  ${cyan("REPL")}
     /clear                  Clear screen
     /help                   This help
     /quit                   Exit
@@ -344,6 +414,120 @@ async function dispatchCommand(
     console.log(`\n  ${WORKSPACE}\n`);
     return;
   }
+  if (input === "/status") {
+    if (!xo) return;
+    const st = xo.stats;
+    const upMs = Date.now() - st.startedAt;
+    const up = upMs >= 60000
+      ? `${Math.floor(upMs / 60000)}m ${Math.floor((upMs % 60000) / 1000)}s`
+      : `${Math.floor(upMs / 1000)}s`;
+    const committed = xo.committed();
+    console.log(`\n  ${cyan("Session")}`);
+    console.log(`  ${kv("provider", PROVIDER_NAMES[committed.provider] ?? committed.provider)}`);
+    console.log(`  ${kv("model", committed.model)}`);
+    console.log(`  ${kv("key", committed.apiKey ? committed.apiKey.slice(0, 4) + "…" + committed.apiKey.slice(-4) : "(none)")}`);
+    console.log(`  ${kv("turns", String(st.turns))}`);
+    console.log(`  ${kv("tokens", `${st.tokensIn} in / ${st.tokensOut} out`)}`);
+    console.log(`  ${kv("uptime", up)}`);
+    console.log(`  ${kv("workspace", WORKSPACE)}\n`);
+    return;
+  }
+  if (input === "/history") {
+    if (!xo) return;
+    if (xo.stats.prompts.length === 0) {
+      console.log(`\n  ${dim("no prompts yet this session")}\n`);
+      return;
+    }
+    console.log(`\n  ${cyan("Prompts this session")}`);
+    xo.stats.prompts.forEach((prompt, i) => {
+      const oneLine = prompt.replace(/\s+/g, " ");
+      const shown = oneLine.length > 70 ? oneLine.slice(0, 70) + "…" : oneLine;
+      console.log(`  ${dim(String(i + 1).padStart(2))}. ${shown}`);
+    });
+    console.log();
+    return;
+  }
+  if (input === "/clear-chat") {
+    if (!xo) return;
+    xo.setAgent(wireAgentFor(xo.committed(), registry));
+    xo.stats.transcript.length = 0;
+    xo.stats.turns = 0;
+    xo.stats.tokensIn = 0;
+    xo.stats.tokensOut = 0;
+    console.log(`\n  ${icons.ok} Conversation reset (fresh agent, stats zeroed).\n`);
+    return;
+  }
+  if (input === "/save") {
+    if (!xo) return;
+    const file = path.join(WORKSPACE, `session-${new Date().toISOString().replace(/[:.]/g, "-")}.md`);
+    const lines = [
+      "# Elysium session transcript", "",
+      `- date: ${new Date().toISOString()}`,
+      `- provider: ${xo.committed().provider} (${xo.committed().model})`,
+      `- turns: ${xo.stats.turns}, tokens: ${xo.stats.tokensIn} in / ${xo.stats.tokensOut} out`, "",
+    ];
+    for (const m of xo.stats.transcript) {
+      lines.push(m.role === "user" ? "## ❯ user" : "## ⚡ elysium", "", m.text, "");
+    }
+    fs.writeFileSync(file, lines.join("\n"), "utf-8");
+    console.log(`\n  ${icons.ok} Transcript saved: ${file}\n`);
+    return;
+  }
+  if (input.startsWith("/swarm ")) {
+    if (!xo) return;
+    const goal = input.slice(7).trim();
+    if (goal.length === 0) {
+      throw new RecoverableCliError("Missing goal", "Usage: /swarm <what to achieve>");
+    }
+    const committed = xo.committed();
+    if (!CREDENTIAL_LESS.has(committed.provider) && !committed.apiKey) {
+      throw new MissingApiKeyError(committed.provider);
+    }
+    const sp = spinner();
+    sp.start("swarm: planning…");
+    const providerCfg = { baseUrl: committed.baseUrl, apiKey: committed.apiKey || "ollama", model: committed.model };
+    try {
+      const report = await runSwarmGoal({
+        goal,
+        provider: providerCfg,
+        onEvent: (e: SwarmEvent) => {
+          if (e.type === "plan") {
+            sp.stop("plan ready");
+            const tasks = (e.data as { subtasks?: Array<{ id: string; goal: string }> }).subtasks ?? [];
+            console.log(`  ${cyan("plan")}`);
+            for (const t of tasks) console.log(`    ${dim(t.id)}  ${t.goal}`);
+            console.log();
+            sp.start("swarm: executing subtasks…");
+          } else if (e.type === "task_started") {
+            console.log(`  ${icons.gear} start ${(e.data as { taskId?: string }).taskId ?? ""}`);
+          } else if (e.type === "task_ended") {
+            const d = e.data as { taskId?: string; status?: string };
+            const icon = d.status === "pass" ? green(icons.ok) : red(icons.err);
+            console.log(`  ${icon} ${d.taskId ?? ""} ${dim(d.status ?? "")}`);
+          } else if (e.type === "critic") {
+            const d = e.data as { taskId?: string; passed?: boolean };
+            console.log(`  ${d.passed ? green(icons.ok) : yellow(icons.warn)} critic ${d.taskId ?? ""} ${d.passed ? "passed" : "repair scheduled"}`);
+          } else if (e.type === "repair") {
+            console.log(`  ${yellow(icons.warn)} repair ${(e.data as { taskId?: string }).taskId ?? ""}`);
+          }
+        },
+      });
+      sp.stop("swarm complete");
+      console.log(`\n  ${cyan("Report")} — ${report.allPassed ? green("ALL PASSED") : yellow("WITH FAILURES")}`);
+      for (const sub of report.subtasks) {
+        const icon = sub.result.status === "pass" ? green(icons.ok) : red(icons.err);
+        console.log(`  ${icon} ${sub.task.id}: ${dim(sub.result.summary.slice(0, 100))}`);
+      }
+      for (const sc of report.scores) {
+        console.log(`  ${cyan("quality")} ${sc.taskId}: ${sc.weighted}/10 ${sc.passed ? green("pass") : red("fail")}`);
+      }
+      console.log(`  ${dim("workspace: " + report.workspacePath)}\n`);
+    } catch (err: unknown) {
+      sp.stop(undefined, "swarm failed");
+      throw err;
+    }
+    return;
+  }
   if (input.startsWith("/")) {
     const cmd = input.split(/\s+/)[0] ?? "";
     console.log(`\n  ⚠️  Unknown command: ${cmd}`);
@@ -356,16 +540,15 @@ async function dispatchCommand(
 
 async function runRepl(startConfig: ProviderConfig): Promise<void> {
   const registry = createToolRegistry();
+  const stats = newSessionStats();
   const state: ReplState = { config: startConfig, committed: startConfig };
-  let agent = wireAgentFor(state.committed, registry);
+  let agent = wireAgentFor(state.committed, registry, { stats });
 
-  console.log("\n  ╔══════════════════════════════════════════╗");
-  console.log("  ║        ⚡  Elysium Harness  ⚡           ║");
-  console.log("  ║        AI Agent with Tool Use            ║");
-  console.log("  ╚══════════════════════════════════════════╝\n");
-  console.log(`  Provider: ${describeConfig(state.committed)}`);
-  console.log(`  Workspace: ${WORKSPACE}`);
-  console.log("  Type /help for commands.  Ctrl+C aborts the current run; twice to quit.\n");
+  console.log(box(`${icons.spark} Elysium Harness`, "AI agent with tool use"));
+  console.log();
+  console.log(kv("provider", describeConfig(state.committed)));
+  console.log(kv("workspace", WORKSPACE));
+  console.log(`  ${dim("Type /help for commands. Ctrl+C aborts a run; twice to quit.\n")}`);
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -381,7 +564,7 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
   let lineQueue: Promise<void> = Promise.resolve();
   rl.on("line", (raw: string) => {
     lineQueue = lineQueue
-      .then(() => handleReplLine(raw, { state, registry, setAgent: (a) => { agent = a; }, getAgent: () => agent }))
+      .then(() => handleReplLine(raw, { state, registry, stats, setAgent: (a) => { agent = a; }, getAgent: () => agent }))
       .catch((err: unknown) => {
         console.error(`\n  ✗ Command loop error: ${err instanceof Error ? err.message : String(err)}\n`);
       })
@@ -439,6 +622,7 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
 interface ReplContext {
   state: ReplState;
   registry: ToolRegistry;
+  stats: SessionStats;
   setAgent: (agent: Agent) => void;
   getAgent: () => Agent;
 }
@@ -457,7 +641,7 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
     try {
       await dispatchCommand(line, xo.state, xo.registry, (nextConfig) => {
         xo.setAgent(wireAgentFor(nextConfig, xo.registry));
-      });
+      }, { stats: xo.stats, setAgent: xo.setAgent, committed: () => xo.state.committed });
     } catch (err: unknown) {
       if (err instanceof RecoverableCliError) {
         emitCliError("recoverable_command_error", `${err.name}: ${err.message}`);
@@ -476,10 +660,12 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
   try {
     const t0 = Date.now();
     const agent = xo.getAgent();
+    xo.stats.prompts.push(line);
     // Mark in-flight so SIGINT can abort exactly this run through the
     // Agent.abort() seam (a per-run AbortController inside the core loop).
     const seam = (globalThis as { __elysiumRunSeam?: { start(a: Agent): void; end(): void } }).__elysiumRunSeam;
     seam?.start(agent);
+    liveStreamed = false;
     let result;
     try {
       result = await agent.run(line);
@@ -487,26 +673,46 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
       seam?.end();
     }
     const dt = Date.now() - t0;
-    let printed = false;
-    for (const m of result.messages) {
-      if (m.role === "assistant" && m.text) {
-        console.log(`\n${m.text}`);
-        printed = true;
-      } else if (m.role === "tool_result") {
-        const icon = m.isError ? "✗" : "✓";
-        const preview = m.content.length > 120 ? m.content.slice(0, 120) + "…" : m.content;
-        console.log(`  ${icon} ${m.toolName}: ${preview}`);
+    if (liveStreamed) {
+      // Deltas were already printed live; just close the block.
+      process.stdout.write("\n");
+    } else {
+      // Nothing streamed (mock/quiet provider): replay the transcript.
+      let printed = false;
+      for (const m of result.messages) {
+        if (m.role === "assistant" && m.text) {
+          console.log(`\n${m.text}`);
+          printed = true;
+        } else if (m.role === "tool_result") {
+          const icon = m.isError ? icons.err : icons.ok;
+          const preview = m.content.length > 120 ? m.content.slice(0, 120) + "…" : m.content;
+          console.log(`  ${icon} ${m.toolName}: ${preview}`);
+        }
       }
+      if (!printed) console.log("\n  (no response)");
     }
-    if (!printed) console.log("\n  (no response)");
-    console.log(`  ── ${result.turns}t ${result.usage.inputTokens}+${result.usage.outputTokens}tok ${dt}ms${result.stopReason === "aborted" ? " (aborted)" : ""} ──`);
+    // Session bookkeeping.
+    if (xo.stats) {
+      xo.stats.tokensIn += result.usage.inputTokens;
+      xo.stats.tokensOut += result.usage.outputTokens;
+      xo.stats.turns += result.turns;
+      const lastA = [...result.messages].reverse().find((m) => m.role === "assistant");
+      xo.stats.transcript.push({ role: "user", text: line });
+      if (lastA && lastA.role === "assistant") xo.stats.transcript.push({ role: "assistant", text: lastA.text });
+    }
+    console.log(`  ${hr()}`);
+    console.log(`  ${dim(`${result.turns} turns · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out tok · ${dt}ms${result.stopReason === "aborted" ? " · aborted" : ""}`)}`);
   } catch (err: unknown) {
     if (err instanceof RecoverableCliError) {
       renderRecoverableError(err.message, err.action);
     } else {
       const msg = err instanceof Error ? err.message : String(err);
       emitCliError("agent_run_error", msg);
-      console.error(`\n  ✗ Agent error (logged): ${msg}\n`);
+      // Friendly translation for provider/network failures.
+      const t = translateProviderError(err);
+      console.error(`\n  ${red(icons.err)} ${yellow(t.title)}`);
+      console.error(`  ${dim("→ " + t.hint)}`);
+      console.error(`  ${dim("detail: " + t.detail)}\n`);
     }
   }
 }
@@ -595,7 +801,7 @@ async function main(): Promise<void> {
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--task" && argv[i + 1]) { taskArg = argv[i + 1] ?? null; i += 1; continue; }
     if (argv[i] === "--provider" && argv[i + 1]) { providerArg = argv[i + 1] ?? null; i += 1; continue; }
-    if (argv[i] && !argv[i]!.startsWith("-")) taskArg = argv[i];
+    if (argv[i] !== undefined && !argv[i]!.startsWith("-")) taskArg = argv[i]!;
   }
   let config = loadConfig(PROJECT_ROOT);
   if (providerArg) config = { ...config, provider: providerArg as ProviderName };
@@ -609,11 +815,7 @@ async function main(): Promise<void> {
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]?.replace(/\\/g, "/")}`) {
-  main().catch((err: unknown) => {
-    console.error(err instanceof FatalError ? err.message : err);
-    process.exit(1);
-  });
-} else {
-  void main();
-}
+main().catch((err: unknown) => {
+  console.error(err instanceof Error ? err.message : err);
+  process.exit(1);
+});

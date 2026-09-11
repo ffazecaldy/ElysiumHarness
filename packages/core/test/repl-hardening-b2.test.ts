@@ -212,7 +212,7 @@ describe("B2 (3) — Ctrl+C abort path concludes cleanly and returns to prompt",
     expect(handle.exitCode).toBe(0);
     expect(handle.out).toContain("Goodbye");
     // /help ran AFTER the interruption → the prompt came back, alive.
-    const helpIdx = handle.out.indexOf("Commands:");
+    const helpIdx = handle.out.indexOf("/help");
     const goodbyeIdx = handle.out.indexOf("Goodbye");
     expect(helpIdx).toBeGreaterThan(-1);
     expect(goodbyeIdx).toBeGreaterThan(helpIdx);

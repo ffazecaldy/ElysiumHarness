@@ -70,7 +70,9 @@ describe("REPL command error boundary (Parte A)", () => {
   it("Test 4 — /help still works after a failed /model", () => {
     const { out } = runReplSession(["/model glm", "/help", "/quit"]);
     const glmIdx = out.indexOf("No API key configured for glm");
-    const helpIdx = out.indexOf("Commands:");
+    // A unique string from the /help OUTPUT (not the echoed input line):
+    // the /swarm help row only exists in the help body.
+    const helpIdx = out.indexOf("/swarm <goal>");
     expect(glmIdx).toBeGreaterThan(-1);
     expect(helpIdx).toBeGreaterThan(glmIdx); // help ran AFTER the failure
   });
