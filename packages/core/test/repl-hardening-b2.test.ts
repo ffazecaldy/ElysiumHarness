@@ -210,10 +210,10 @@ describe("B2 (3) — Ctrl+C abort path concludes cleanly and returns to prompt",
   it("REPL survives an in-run interrupt (\\u0003 piped via stdin) and answers /help after", () => {
     const handle = runRepl(["long. generation. please.", "\u0003", "/help", "/quit"], 120_000);
     expect(handle.exitCode).toBe(0);
-    expect(handle.out).toContain("Goodbye");
+    expect(handle.out).toContain("session ended");
     // /help ran AFTER the interruption → the prompt came back, alive.
     const helpIdx = handle.out.indexOf("/help");
-    const goodbyeIdx = handle.out.indexOf("Goodbye");
+    const goodbyeIdx = handle.out.indexOf("session ended");
     expect(helpIdx).toBeGreaterThan(-1);
     expect(goodbyeIdx).toBeGreaterThan(helpIdx);
     expect(handle.out).not.toContain("uncaughtException");

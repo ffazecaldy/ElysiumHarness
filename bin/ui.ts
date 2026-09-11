@@ -1,16 +1,14 @@
 /**
  * bin/ui.ts — zero-dependency ANSI theme for the Elysium CLI.
  *
- * No external packages (no chalk): raw SGR escape codes only. Colors are
- * DISABLED when either:
- *   - NO_COLOR is set (https://no-color.org — any value, including empty), or
- *   - stdout is not a TTY (piped tests, CI logs) — process.stdout.isTTY false.
- * Disabled mode returns strings untouched, so assertions on piped output see
- * plain text. stripAnsi() is provided for tests/consumers that must remove
- * decorations from already-rendered strings.
+ * Design language: minimal professional terminal UI (Claude Code / Aider
+ * school) — restrained color, typographic hierarchy, NO decorative emoji.
+ * Status is conveyed with typographic markers ([ok] [!!] [..]) plus color,
+ * so output stays clean, greppable, and screen-reader friendly.
  *
- * Everything here is presentation-only: no process.exit, no stdin, no
- * globals beyond the spinner instance you create.
+ * No external packages: raw SGR escape codes only. Colors are DISABLED when
+ * either NO_COLOR is set (https://no-color.org) or stdout is not a TTY.
+ * Disabled mode returns strings untouched, so piped/test output is plain.
  */
 
 /** A function that wraps text in a color (or returns it untouched). */
@@ -33,15 +31,26 @@ export const green = colorize("32", "39");
 export const yellow = colorize("33", "39");
 export const red = colorize("31", "39");
 export const magenta = colorize("35", "39");
+export const white = colorize("97", "39");
 
-/** Unicode glyph vocabulary (plain chars — safe when colors are off). */
+/** Typographic status markers — no emoji, greppable, color-independent. */
+export const marks = {
+  ok: "[ok]",
+  err: "[!!]",
+  warn: "[!!]",
+  info: "--",
+  run: ">>",
+  prompt: ">",
+} as const;
+
+/** Alias kept for call-site readability: section headers, not decoration. */
 export const icons = {
-  ok: "✓",
-  err: "✗",
-  warn: "⚠",
-  info: "→",
-  spark: "⚡",
-  gear: "⚙",
+  ok: marks.ok,
+  err: marks.err,
+  warn: marks.warn,
+  info: marks.info,
+  spark: "",
+  gear: marks.run,
 } as const;
 
 const ANSI_PATTERN = /\u001B\[[0-9;]*[A-Za-z]/g;
@@ -56,35 +65,40 @@ function visualWidth(s: string): number {
   return Array.from(stripAnsi(s)).length;
 }
 
-/** Horizontal rule, indented to the CLI gutter. */
-export function hr(width = 56): string {
-  return `  ${dim("─".repeat(width))}`;
+/** Horizontal rule spanning the terminal width (or the given width). */
+export function hr(width?: number): string {
+  const w = width ?? Math.max(40, (process.stdout.columns ?? 100) - 4);
+  return dim("─".repeat(w));
 }
 
-/** Aligned "label    value" status line with the CLI gutter. */
+/** Aligned "label      value" status line with a 2-space gutter. */
 export function kv(label: string, value: string): string {
-  const pad = Math.max(1, 11 - label.length);
-  return `  ${cyan(label)}${" ".repeat(pad)} ${value}`;
+  const pad = Math.max(1, 12 - label.length);
+  return `  ${cyan(label.padEnd(12))}${" ".repeat(0)}${value}`;
 }
 
 /**
- * Rounded box renderer for the banner. Handles ANSI-bearing content:
- * widths are computed on stripped text.
+ * Section header: uppercase label over a rule. The professional way to
+ * separate areas without emoji.
+ */
+export function section(title: string): string {
+  return `\n  ${bold(title.toUpperCase())}\n  ${dim("─".repeat(Math.max(24, title.length + 2)))}`;
+}
+
+/**
+ * Wordmark banner: typographic, no box art. "ELYSIUM" in bold with a
+ * thin rule and the product line beneath — Claude-Code-school restraint.
  */
 export function box(title: string, subtitle = ""): string {
-  const lines = subtitle.length > 0 ? [title, subtitle] : [title];
-  const inner = Math.max(...lines.map((l) => visualWidth(l))) + 4;
-  const top = `  ${dim(`╭${"─".repeat(inner)}╮`)}`;
-  const bottom = `  ${dim(`╰${"─".repeat(inner)}╯`)}`;
-  const body = lines.map((l) => {
-    const pad = Math.max(0, inner - 2 - visualWidth(l));
-    return `  ${dim("│")}  ${l}${" ".repeat(pad)}${dim("│")}`;
-  });
-  return [top, ...body, bottom].join("\n");
+  const rule = dim("─".repeat(Math.max(40, (process.stdout.columns ?? 100) - 4)));
+  const head = `  ${bold(white(title))}`;
+  const sub = subtitle.length > 0 ? `  ${dim(subtitle)}` : "";
+  return [rule, head, sub, rule].filter((l) => l.length > 0).join("\n");
 }
 
 // ── Spinner ───────────────────────────────────────────────────────
 
+/** Minimal professional spinner: braille dots, no color circus. */
 const DEFAULT_FRAMES: readonly string[] = [
   "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
 ];
@@ -112,7 +126,7 @@ export function spinner(frames: readonly string[] = DEFAULT_FRAMES): Spinner {
     if (animated) process.stdout.write("\r\u001B[K");
   };
   const render = (): void => {
-    process.stdout.write(`\r\u001B[K  ${cyan(frames[index] ?? "")} ${dim(current)}`);
+    process.stdout.write(`\r\u001B[K  ${dim(frames[index] ?? "")} ${dim(current)}`);
   };
 
   return {
@@ -132,8 +146,8 @@ export function spinner(frames: readonly string[] = DEFAULT_FRAMES): Spinner {
         timer = null;
       }
       if (animated) clearLine();
-      if (okText !== undefined) console.log(`  ${green(icons.ok)} ${okText}`);
-      else if (errText !== undefined) console.log(`  ${red(icons.err)} ${errText}`);
+      if (okText !== undefined) console.log(`  ${green(marks.ok)} ${okText}`);
+      else if (errText !== undefined) console.log(`  ${red(marks.err)} ${errText}`);
     },
   };
 }

@@ -59,11 +59,13 @@ import {
 } from "../packages/cli/src/config";
 import {
   dim,
+  bold,
   cyan,
   green,
   red,
   yellow,
-  icons,
+  marks,
+  section,
   box,
   hr,
   kv,
@@ -194,9 +196,9 @@ function wireAgentFor(
       } else if (e.kind === "tool_result") {
         const m = (e.data as { message?: ToolResultMessage }).message;
         if (m) {
-          const icon = m.isError ? red(icons.err) : green(icons.ok);
+          const status = m.isError ? red("err") : green("ok");
           const preview = m.content.length > 90 ? m.content.slice(0, 90) + "…" : m.content;
-          console.log(`  ${icons.gear} ${cyan(m.toolName)} ${icon} ${dim(preview.replace(/\n/g, " "))}`);
+          console.log(`  ${dim("tool")} ${cyan(m.toolName)} ${status}  ${dim(preview.replace(/\n/g, " "))}`);
         }
       }
     },
@@ -275,9 +277,9 @@ interface ReplState {
 }
 
 function renderRecoverableError(title: string, action: string): void {
-  console.log(`\n  ⚠️  ${title}`);
-  if (action) console.log(`  → ${action}`);
-  console.log(`\n`);
+  console.log(`\n  ${yellow(marks.warn)} ${bold(title)}`);
+  if (action) console.log(`  ${dim(marks.info + " " + action)}`);
+  console.log();
 }
 
 async function dispatchCommand(
@@ -365,7 +367,7 @@ async function dispatchCommand(
     void candidateAgent;
     saveEnvValue(PROJECT_ROOT, "ELYSIUM_PROVIDER", target);
     if (targetModel) saveEnvValue(PROJECT_ROOT, "ELYSIUM_MODEL", targetModel);
-    console.log(`\n  ✓ Active provider: ${describeConfig(candidate)}\n`);
+    console.log(`\n  ${green(marks.ok)} Active provider: ${describeConfig(candidate)}\n`);
     return;
   }
   if (input.startsWith("/key ")) {
@@ -389,7 +391,7 @@ async function dispatchCommand(
     }
     saveEnvValue(PROJECT_ROOT, "ELYSIUM_API_KEY", key);
     saveEnvValue(PROJECT_ROOT, "ELYSIUM_PROVIDER", prov);
-    console.log(`\n  ✅ Key saved for ${PROVIDER_NAMES[prov] ?? prov} (${maskKey(key)})`);
+    console.log(`\n  ${green(marks.ok)} Key saved for ${PROVIDER_NAMES[prov] ?? prov} (${maskKey(key)})`);
     console.log(`  → Now switch: /model ${prov}\n`);
     return;
   }
@@ -422,7 +424,7 @@ async function dispatchCommand(
       ? `${Math.floor(upMs / 60000)}m ${Math.floor((upMs % 60000) / 1000)}s`
       : `${Math.floor(upMs / 1000)}s`;
     const committed = xo.committed();
-    console.log(`\n  ${cyan("Session")}`);
+    console.log(section("session"));
     console.log(`  ${kv("provider", PROVIDER_NAMES[committed.provider] ?? committed.provider)}`);
     console.log(`  ${kv("model", committed.model)}`);
     console.log(`  ${kv("key", committed.apiKey ? committed.apiKey.slice(0, 4) + "…" + committed.apiKey.slice(-4) : "(none)")}`);
@@ -454,7 +456,7 @@ async function dispatchCommand(
     xo.stats.turns = 0;
     xo.stats.tokensIn = 0;
     xo.stats.tokensOut = 0;
-    console.log(`\n  ${icons.ok} Conversation reset (fresh agent, stats zeroed).\n`);
+    console.log(`\n  ${marks.ok} Conversation reset (fresh agent, stats zeroed).\n`);
     return;
   }
   if (input === "/save") {
@@ -467,10 +469,10 @@ async function dispatchCommand(
       `- turns: ${xo.stats.turns}, tokens: ${xo.stats.tokensIn} in / ${xo.stats.tokensOut} out`, "",
     ];
     for (const m of xo.stats.transcript) {
-      lines.push(m.role === "user" ? "## ❯ user" : "## ⚡ elysium", "", m.text, "");
+      lines.push(m.role === "user" ? "## > user" : "## elysium", "", m.text, "");
     }
     fs.writeFileSync(file, lines.join("\n"), "utf-8");
-    console.log(`\n  ${icons.ok} Transcript saved: ${file}\n`);
+    console.log(`\n  ${marks.ok} Transcript saved: ${file}\n`);
     return;
   }
   if (input.startsWith("/swarm ")) {
@@ -499,29 +501,30 @@ async function dispatchCommand(
             console.log();
             sp.start("swarm: executing subtasks…");
           } else if (e.type === "task_started") {
-            console.log(`  ${icons.gear} start ${(e.data as { taskId?: string }).taskId ?? ""}`);
+            console.log(`  ${marks.run} start ${(e.data as { taskId?: string }).taskId ?? ""}`);
           } else if (e.type === "task_ended") {
             const d = e.data as { taskId?: string; status?: string };
-            const icon = d.status === "pass" ? green(icons.ok) : red(icons.err);
+            const icon = d.status === "pass" ? green(marks.ok) : red(marks.err);
             console.log(`  ${icon} ${d.taskId ?? ""} ${dim(d.status ?? "")}`);
           } else if (e.type === "critic") {
             const d = e.data as { taskId?: string; passed?: boolean };
-            console.log(`  ${d.passed ? green(icons.ok) : yellow(icons.warn)} critic ${d.taskId ?? ""} ${d.passed ? "passed" : "repair scheduled"}`);
+            console.log(`  ${d.passed ? green(marks.ok) : yellow(marks.warn)} critic ${d.taskId ?? ""} ${d.passed ? "passed" : "repair scheduled"}`);
           } else if (e.type === "repair") {
-            console.log(`  ${yellow(icons.warn)} repair ${(e.data as { taskId?: string }).taskId ?? ""}`);
+            console.log(`  ${yellow(marks.warn)} repair ${(e.data as { taskId?: string }).taskId ?? ""}`);
           }
         },
       });
       sp.stop("swarm complete");
-      console.log(`\n  ${cyan("Report")} — ${report.allPassed ? green("ALL PASSED") : yellow("WITH FAILURES")}`);
+      console.log(`\n  ${section("report")}`);
+      console.log(`  ${report.allPassed ? green("all subtasks passed") : yellow("completed with failures")}`);
       for (const sub of report.subtasks) {
-        const icon = sub.result.status === "pass" ? green(icons.ok) : red(icons.err);
+        const icon = sub.result.status === "pass" ? green(marks.ok) : red(marks.err);
         console.log(`  ${icon} ${sub.task.id}: ${dim(sub.result.summary.slice(0, 100))}`);
       }
       for (const sc of report.scores) {
-        console.log(`  ${cyan("quality")} ${sc.taskId}: ${sc.weighted}/10 ${sc.passed ? green("pass") : red("fail")}`);
+        console.log(`  ${cyan("quality")} ${sc.taskId.padEnd(12)} ${sc.weighted}/10 ${sc.passed ? green("pass") : red("fail")}`);
       }
-      console.log(`  ${dim("workspace: " + report.workspacePath)}\n`);
+      console.log(`\n  ${dim("workspace: " + report.workspacePath)}\n`);
     } catch (err: unknown) {
       sp.stop(undefined, "swarm failed");
       throw err;
@@ -530,8 +533,8 @@ async function dispatchCommand(
   }
   if (input.startsWith("/")) {
     const cmd = input.split(/\s+/)[0] ?? "";
-    console.log(`\n  ⚠️  Unknown command: ${cmd}`);
-    console.log(`  → /help lists available commands\n`);
+    console.log(`\n  ${yellow(marks.warn)} Unknown command: ${cmd}`);
+    console.log(`  ${dim(marks.info + " /help lists available commands")}\n`);
     return;
   }
 }
@@ -544,7 +547,7 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
   const state: ReplState = { config: startConfig, committed: startConfig };
   let agent = wireAgentFor(state.committed, registry, { stats });
 
-  console.log(box(`${icons.spark} Elysium Harness`, "AI agent with tool use"));
+  console.log(box("ELYSIUM", "AI agent with tool use"));
   console.log();
   console.log(kv("provider", describeConfig(state.committed)));
   console.log(kv("workspace", WORKSPACE));
@@ -553,7 +556,7 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: "⚡ > ",
+    prompt: "> ",
     historySize: 100,
   });
   rl.prompt();
@@ -596,7 +599,7 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
     if (running !== null) {
       running.abort(); // per-run AbortController inside the core Agent loop
       inFlight = null;
-      console.log("\n  ⚡ Generation aborted (Ctrl+C) — back at the prompt.\n");
+      console.log(`\n  ${yellow(marks.warn)} Generation aborted — back at the prompt.\n`);
       rl.prompt();
       return;
     }
@@ -605,7 +608,7 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
       process.exit(0);
     }
     lastCtrlC = now;
-    console.log("\n  ⚠️  Press Ctrl+C again within 3s to exit.\n");
+    console.log(`\n  ${yellow(marks.warn)} Press Ctrl+C again within 3s to exit.\n`);
     rl.prompt();
   };
 
@@ -631,7 +634,7 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
   const line = input.trim();
   if (!line) return;
   if (line === "/quit" || line === "/exit") {
-    console.log("\n  👋 Goodbye.\n");
+    console.log("\n  " + dim("session ended.") + "\n");
     process.exit(0);
   }
   if (line === "/clear") { console.clear(); return; }
@@ -684,7 +687,7 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
           console.log(`\n${m.text}`);
           printed = true;
         } else if (m.role === "tool_result") {
-          const icon = m.isError ? icons.err : icons.ok;
+          const icon = m.isError ? marks.err : marks.ok;
           const preview = m.content.length > 120 ? m.content.slice(0, 120) + "…" : m.content;
           console.log(`  ${icon} ${m.toolName}: ${preview}`);
         }
@@ -700,8 +703,7 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
       xo.stats.transcript.push({ role: "user", text: line });
       if (lastA && lastA.role === "assistant") xo.stats.transcript.push({ role: "assistant", text: lastA.text });
     }
-    console.log(`  ${hr()}`);
-    console.log(`  ${dim(`${result.turns} turns · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out tok · ${dt}ms${result.stopReason === "aborted" ? " · aborted" : ""}`)}`);
+    console.log(`  ${dim(`─ ${result.turns} turns · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out tok · ${dt}ms${result.stopReason === "aborted" ? " · aborted" : ""}`)}`);
   } catch (err: unknown) {
     if (err instanceof RecoverableCliError) {
       renderRecoverableError(err.message, err.action);
@@ -710,7 +712,7 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
       emitCliError("agent_run_error", msg);
       // Friendly translation for provider/network failures.
       const t = translateProviderError(err);
-      console.error(`\n  ${red(icons.err)} ${yellow(t.title)}`);
+      console.error(`\n  ${red(marks.err)} ${yellow(t.title)}`);
       console.error(`  ${dim("→ " + t.hint)}`);
       console.error(`  ${dim("detail: " + t.detail)}\n`);
     }
@@ -759,7 +761,7 @@ process.on("unhandledRejection", (reason) => {
   emitCliError("unhandled_rejection", msg);
   if (replActive) {
     console.error(`\n  ✗ [unhandledRejection, logged, still alive] ${msg}\n`);
-    process.stdout.write("⚡ > ");
+    process.stdout.write("> ");
   } else {
     console.error(`  ✗ Unhandled rejection: ${msg}`);
   }
@@ -769,7 +771,7 @@ process.on("uncaughtException", (err) => {
   emitCliError("uncaught_exception", err.message);
   if (replActive) {
     console.error(`\n  ✗ [uncaughtException, logged, still alive] ${err.message}\n`);
-    process.stdout.write("⚡ > ");
+    process.stdout.write("> ");
   } else {
     console.error(err);
     process.exit(1);

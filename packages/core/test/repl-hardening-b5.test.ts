@@ -112,15 +112,15 @@ describe("B5 — generalized command-kill coverage (REPL survives every slash co
 
       // (2) the loop stayed alive to the very end: Goodbye banner emitted,
       //     and /help output came right before it.
-      expect(out, `output for ${JSON.stringify(lines)}`).toContain("Goodbye");
+      expect(out, `output for ${JSON.stringify(lines)}`).toContain("session ended");
       const helpIdx = out.indexOf("/help");
-      const goodbyeIdx = out.indexOf("Goodbye");
+      const goodbyeIdx = out.indexOf("session ended");
       expect(helpIdx, `/help ran for ${JSON.stringify(lines)}`).toBeGreaterThan(-1);
       expect(goodbyeIdx).toBeGreaterThan(helpIdx);
 
       // (3) malformed inputs must render a recoverable marker (⚠ or ✗),
       //     never a crash — since exit code is already 0, no crash occurred.
-      const hasMarker = /⚠|✗/.test(out);
+      const hasMarker = /\[!!\]|⚠|✗/.test(out);
       if (malformed) {
         expect(hasMarker, `recoverable marker for ${JSON.stringify(lines)}`).toBe(true);
       } else {
@@ -135,7 +135,7 @@ describe("B5 — generalized command-kill coverage (REPL survives every slash co
   it("plain-text lines go to the mock agent without killing the REPL", () => {
     const { out, exitCode } = runReplSession(["hello there", "second plain line", "/quit"]);
     expect(exitCode).toBe(0);
-    expect(out).toContain("Goodbye");
+    expect(out).toContain("session ended");
     // The mock agent answers plain text (echo-style), proving lines reached it.
     expect(out.toLowerCase()).toContain("mock");
   });

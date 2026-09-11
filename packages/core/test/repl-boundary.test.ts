@@ -47,14 +47,14 @@ describe("REPL command error boundary (Parte A)", () => {
     expect(out).toContain("No API key configured for glm");
     expect(out).toContain("provider stays: mock");
     expect(out).toContain("/help");
-    expect(out).toContain("Goodbye");
+    expect(out).toContain("session ended");
     expect(exitCode).toBe(0); // process terminated cleanly by /quit, not by the error
   });
 
   it("Test 2 — unknown provider shows an error and keeps the REPL", () => {
     const { out, exitCode } = runReplSession(["/model does-not-exist", "/quit"]);
     expect(out).toContain("Unknown provider: does-not-exist");
-    expect(out).toContain("Goodbye");
+    expect(out).toContain("session ended");
     expect(exitCode).toBe(0);
   });
 
