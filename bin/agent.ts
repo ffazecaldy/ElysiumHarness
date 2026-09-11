@@ -559,7 +559,7 @@ async function dispatchCommand(
     console.log(`  ${kv("model", committed.model)}`);
     console.log(`  ${kv("key", committed.apiKey ? committed.apiKey.slice(0, 4) + "…" + committed.apiKey.slice(-4) : "(none)")}`);
     console.log(`  ${kv("turns", String(st.turns))}`);
-    console.log(`  ${kv("tokens", `${st.tokensIn} in / ${st.tokensOut} out`)}`);
+    console.log(`  ${kv("tokens", String(st.tokensIn + st.tokensOut))}`);
     console.log(`  ${kv("uptime", up)}`);
     console.log(`  ${kv("workspace", WORKSPACE)}\n`);
     return;
@@ -901,7 +901,8 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
     const abortedSuffix = result.stopReason === "aborted" ? " | aborted" : "";
         const secs = dt / 1000;
     const tps = secs > 0 ? (result.usage.outputTokens / secs).toFixed(1) : "-";
-    console.log(`  ${dim(`─ ${result.turns} turn${result.turns === 1 ? "" : "s"} · ${result.usage.inputTokens} in / ${result.usage.outputTokens} out · ${tps} tok/s · ${(dt / 1000).toFixed(1)}s${result.stopReason === "aborted" ? " · aborted" : ""}`)}`);
+    const totalTokens = result.usage.inputTokens + result.usage.outputTokens;
+    console.log(`  ${dim(`─ ${totalTokens} tok · ${tps} tok/s · ${(dt / 1000).toFixed(1)}s${result.stopReason === "aborted" ? " · aborted" : ""}`)}`);
   } catch (err: unknown) {
     if (err instanceof RecoverableCliError) {
       renderRecoverableError(err.message, err.action);
