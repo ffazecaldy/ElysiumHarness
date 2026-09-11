@@ -33,7 +33,7 @@ export const PROVIDER_MODELS: Record<string, string> = {
   groq: "llama-3.3-70b-versatile",
   together: "meta-llama/Llama-3-70b-chat-hf",
   openrouter: "anthropic/claude-sonnet-4",
-  ollama: "deepseek-v4-flash:cloud",
+  ollama: "gemma4:31b-cloud",
   glm: "glm-5.3-flash",
   opencode: "deepseek-v4-flash:cloud",
   mock: "mock",

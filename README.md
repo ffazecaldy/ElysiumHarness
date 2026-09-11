@@ -121,16 +121,32 @@ For live judging, swap in `createLlmJudge(provider)`.
 | `/history` | Show the conversation history of the current session |
 | `/clear-chat` | Clear the in-memory conversation (fresh chat, same REPL) |
 | `/save` | Save the current session to a JSONL file under `.elysium/sessions/` |
+| `/mode [min\|medium\|high\|max]` | Set the effort mode for this session; `/mode` alone shows the active one (see [Effort modes](#effort-modes)) |
 | `/swarm <goal>` | Run the goal in Swarmloop mode (see below) |
 | `/quit` | Exit cleanly |
 
 **Streaming output**: assistant text arrives live, token by token, as the provider streams it — no waiting for the full turn.
+
+**Per-turn footer**: each completed turn ends with a closing line reporting tokens used, elapsed time, and tokens/sec.
 
 **Friendly provider errors**: provider failures are translated into plain messages with a suggested fix — out-of-credits, rate limit, bad API key, unreachable host (see the troubleshooting table below). The REPL never crashes on them.
 
 **Session status line**: a compact one-line summary (provider · model · tools · turns) is available via `/status` and shown where relevant, so you always know which provider and session state you are talking to.
 
 **Transactional provider switching**: the target provider is built and validated *before* the live agent is touched; a failed switch leaves the previous provider running. Unknown provider names get a closest-match suggestion (e.g. `/model openIA` → *did you mean 'openai'?*).
+
+### Effort modes
+
+`/mode` selects how much work a turn (or a swarm run) may do. The mode is **session-only**: it resets to `medium` when the REPL restarts, and is not persisted to disk.
+
+| Mode | Max turns | Swarm subtasks | Repair rounds | Tool output | System prompt |
+|---|---|---|---|---|---|
+| `min` | 4 | 1 | 0 | hidden | Terse — minimal instructions |
+| `medium` (default) | 8 | 3 | 1 | visible | Standard |
+| `high` | 12 | 5 | 2 | visible | Stricter — explicit verification steps |
+| `max` | 16 | 6 | 2 | visible | Strictest — double-check everything |
+
+What each column controls: max turns caps the agent loop per turn; swarm subtasks caps the planner's fan-out in `/swarm`; repair rounds is the number of critic-driven retries per failed subtask; tool output visibility controls whether tool results are echoed in the REPL; the system prompt column describes how prescriptive the system prompt is at that mode. `/mode` without arguments shows the active mode.
 
 **Ctrl+C abort**: pressing Ctrl+C during an in-flight agent turn aborts the current turn (via the turn's `AbortSignal`) and returns to the prompt; the provider session and REPL state survive. Pressing it at the prompt exits cleanly (two Ctrl+C within 3 seconds while idle also exits).
 
@@ -141,10 +157,12 @@ Swarmloop mode is a gauntlet-style orchestration profile built on the same depth
 1. **Plan** — your goal goes to a planner agent that decomposes it into subtasks.
 2. **Build** — parallel builder agents (with tool access) execute the subtasks.
 3. **Judge** — a fresh-context critic (sees only the artifact, never the builder's history) judges each result.
-4. **Repair** — failed results get exactly one repair round with the critic's gaps as feedback.
+4. **Repair** — failed results get the effort mode's repair rounds (1 at the default `medium`) with the critic's gaps as feedback.
 5. **Report** — the final report carries per-subtask status, critic verdicts, and quality scores.
 
-Run it from the REPL: `/swarm your-goal`. The number of subtasks is capped (`maxSubtasks`), so a vague goal cannot fan out into an unbounded swarm; subtask concurrency and repair rounds follow the core `Orchestrator` defaults (`maxConcurrency` 4, `repairRounds` 1).
+Run it from the REPL: `/swarm your-goal`. The number of subtasks is capped (`maxSubtasks`, set by the current effort mode — see [Effort modes](#effort-modes)); a vague goal cannot fan out into an unbounded swarm. Repair rounds also follow the effort mode (1 at the default `medium`).
+
+**Live progress**: during execution the REPL streams what each subagent does in real time — its text output and tool calls, each line prefixed by the subtask's `taskId` — plus critic verdicts and repair rounds as they happen, so the gauntlet is observable end-to-end rather than silent until the final report.
 
 ## Provider troubleshooting
 

@@ -569,12 +569,20 @@ async function runRepl(startConfig: ProviderConfig): Promise<void> {
     lineQueue = lineQueue
       .then(() => handleReplLine(raw, { state, registry, stats, setAgent: (a) => { agent = a; }, getAgent: () => agent }))
       .catch((err: unknown) => {
-        console.error(`\n  ✗ Command loop error: ${err instanceof Error ? err.message : String(err)}\n`);
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg === "readline was closed") return; // stdin EOF race after last line: benign
+        console.error(`\n  ${marks.err} Command loop error: ${msg}\n`);
       })
       .finally(() => rl.prompt());
   });
 
-  rl.on("close", () => process.exit(0));
+  // stdin EOF (piped input or Ctrl+D): wait for the line queue to settle —
+  // an in-flight agent run must finish and print before the process exits.
+  rl.on("close", () => {
+    lineQueue
+      .then(() => process.exit(0))
+      .catch(() => process.exit(0));
+  });
 
   // ── Ctrl+C (SIGINT) seam: abort generation, not the process ──────
   // The abort/target pair are registered by the agent-turn path below:

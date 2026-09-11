@@ -96,7 +96,8 @@ Hypothesis JSON (normative):
 
 - **`bin/agent.ts`** — the presentation and recovery layer. It renders output, translates typed errors from core (`RecoverableCliError` subclasses, §4.6) via an error boundary into friendly messages + recovery actions, and keeps the REPL alive. No business logic lives here; core owns the loop.
 - **`bin/ui.ts`** — zero-dependency ANSI theme for the CLI (colors, borders, status line). `NO_COLOR`-aware: disables all styling when the variable is set.
-- **`packages/cli/src/swarm-mode.ts`** — Swarmloop mode runtime. Maps the Swarmloop skill's gauntlet profile (planner → parallel builders → fresh-context critic → one repair round → scored report) onto the core `Orchestrator` engine (§2). Exposed in the REPL as `/swarm <goal>`.
+- **`packages/cli/src/swarm-mode.ts`** — Swarmloop mode runtime. Maps the Swarmloop skill's gauntlet profile (planner → parallel builders → fresh-context critic → one repair round → scored report) onto the core `Orchestrator` engine (§2). Exposed in the REPL as `/swarm <goal>`. Emits live progress events (per-subagent text output and tool calls prefixed by `taskId`, critic verdicts, repair rounds) that the REPL renders as they arrive.
+- **Effort modes** (`/mode min|medium|high|max`) — a UI-level orchestration-intensity knob (max turns, swarm subtask count, repair rounds, tool-output visibility, system-prompt strictness). Session-scoped: resolved in the CLI layer, not persisted in core or on disk; default `medium`.
 
 ## 8. Core / Extension Boundary (definitive)
 
