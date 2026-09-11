@@ -71,6 +71,8 @@ import {
   hr,
   kv,
   spinner,
+  thinkingSpinner,
+  magenta,
   translateProviderError,
 } from "./ui";
 import { runSwarmGoal, type SwarmEvent } from "../packages/cli/src/swarm-mode";
@@ -185,6 +187,7 @@ function newSessionStats(): SessionStats {
  */
 let liveStreamed = false;
 let inThink = false;
+let activeSpinner: ReturnType<typeof thinkingSpinner> | null = null;
 
 // ── Event bus (shared: meta-layer & CLI both consume) ─────────────
 
@@ -265,10 +268,13 @@ function wireAgentFor(
       if (e.kind === "text_delta") {
         const d = (e.data as { delta?: string }).delta ?? "";
         if (d) {
-          liveStreamed = true;
-          // Thinking-aware rendering: content inside <think>...</think> (or a
-          // leading "Ragionamento:/Thinking:" block) is rendered dim so the
-          // actual answer stands out. State machine over the stream.
+          if (liveStreamed === false) {
+            // First delta: stop the thinking spinner so output starts clean.
+            activeSpinner?.stop();
+            activeSpinner = null;
+            liveStreamed = true;
+          }
+          // Render with think-awareness (dim inside <think>, white outside).
           let rest = d;
           while (rest.length > 0) {
             if (inThink) {
@@ -852,7 +858,9 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
     const seam = (globalThis as { __elysiumRunSeam?: { start(a: Agent): void; end(): void } }).__elysiumRunSeam;
     seam?.start(agent);
     xo.setWorking(true);
-    console.log(`  ${dim("working... (Esc to cancel)")}`);
+    const sp = thinkingSpinner();
+    activeSpinner = sp;
+    sp.start("");
     liveStreamed = false;
     inThink = false;
     let result;
@@ -861,6 +869,8 @@ async function handleReplLine(input: string, xo: ReplContext): Promise<void> {
     } finally {
       seam?.end();
       xo.setWorking(false);
+      activeSpinner?.stop();
+      activeSpinner = null;
     }
     const dt = Date.now() - t0;
     if (liveStreamed) {

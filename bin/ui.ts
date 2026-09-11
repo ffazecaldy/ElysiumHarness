@@ -24,6 +24,14 @@ function colorize(open: string, reset: string): Colorize {
     COLORS_ENABLED ? `\u001B[${open}m${s}\u001B[${reset}m` : s;
 }
 
+// ── Semantic palette: every color HAS a role ──
+// white  = the model's ANSWER (the star; everything else supports it)
+// cyan   = labels, keys, metadata
+// dim    = secondary info: thinking, tool details, footers
+// green  = success, saved, pass
+// yellow = warnings, cancellations, repair
+// red    = errors, failures
+// magenta = special modes (swarm, agent-to-agent activity)
 export const dim = colorize("2", "22");
 export const bold = colorize("1", "22");
 export const cyan = colorize("36", "39");
@@ -32,6 +40,7 @@ export const yellow = colorize("33", "39");
 export const red = colorize("31", "39");
 export const magenta = colorize("35", "39");
 export const white = colorize("97", "39");
+export const blue = colorize("94", "39");
 
 /** Typographic status markers — no emoji, greppable, color-independent. */
 export const marks = {
@@ -98,9 +107,9 @@ export function box(title: string, subtitle = ""): string {
 
 // ── Spinner ───────────────────────────────────────────────────────
 
-/** Minimal professional spinner: braille dots, no color circus. */
-const DEFAULT_FRAMES: readonly string[] = [
-  "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+/** Thinking spinner: orbiting dot around a center dot (thinking = orbit). */
+const THINKING_FRAMES: readonly string[] = [
+  "⠋ ⠁", "⠙ ⠉", "⠹ ⠙", "⠸ ⠜", "⠼ ⠣", "⠴ ⠡", "⠦ ⠋", "⠧ ⠇", "⠇ ⠏", "⠏ ⠋",
 ];
 
 export interface Spinner {
@@ -116,7 +125,7 @@ export interface Spinner {
  * Non-TTY: start() prints nothing and stop() only prints an outcome, so
  * piped/test output stays deterministic.
  */
-export function spinner(frames: readonly string[] = DEFAULT_FRAMES): Spinner {
+export function spinner(frames: readonly string[] = THINKING_FRAMES): Spinner {
   const animated = COLORS_ENABLED;
   let timer: NodeJS.Timeout | null = null;
   let index = 0;
@@ -146,6 +155,50 @@ export function spinner(frames: readonly string[] = DEFAULT_FRAMES): Spinner {
         timer = null;
       }
       if (animated) clearLine();
+      if (okText !== undefined) console.log(`  ${green(marks.ok)} ${okText}`);
+      else if (errText !== undefined) console.log(`  ${red(marks.err)} ${errText}`);
+    },
+  };
+}
+
+/**
+ * Thinking spinner: a small "orbit" — a cyan rotating braille core with an
+ * orbiting dim dot and a live elapsed-seconds counter. Reads as "the model
+ * is thinking", not as a generic progress bar.
+ * Non-TTY: renders nothing while running (deterministic piped output).
+ */
+export function thinkingSpinner(): Spinner {
+  const ORBIT: readonly string[] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  const animated = COLORS_ENABLED;
+  let timer: NodeJS.Timeout | null = null;
+  let index = 0;
+  let text = "";
+  let startedAt = 0;
+
+  const render = (): void => {
+    const secs = Math.floor((Date.now() - startedAt) / 1000);
+    const t = secs > 0 ? ` ${secs}s` : "";
+    process.stdout.write(`\r\u001B[K  ${cyan(ORBIT[index] ?? "")} ${dim("thinking" + t + " — Esc to cancel")}`);
+  };
+
+  return {
+    start(t: string): void {
+      text = t;
+      startedAt = Date.now();
+      if (!animated || timer !== null) return;
+      render();
+      timer = setInterval(() => {
+        index = (index + 1) % ORBIT.length;
+        render();
+      }, 90);
+      timer.unref();
+    },
+    stop(okText?: string, errText?: string): void {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+      if (animated) process.stdout.write("\r\u001B[K");
       if (okText !== undefined) console.log(`  ${green(marks.ok)} ${okText}`);
       else if (errText !== undefined) console.log(`  ${red(marks.err)} ${errText}`);
     },
